@@ -1,0 +1,64 @@
+Shai Ghost Engine Architecture
+==============================
+
+       [USER TERMINAL]
+              |
+              v
+       [SHAI RUN WRAPPER]
+       (crossterm / pty)
+              |
+      +-------+-------+
+      |               |
+[STDIN PROXY]   [STDOUT SNIFFER]
+      |               |
+      | (Memory Inj)  | (Balanced JSON Scan)
+      v               v
+ [CLI AGENT]    [BACKGROUND WORKER]
+ (Claude/Gemini)      |
+      |               | (Stabilization / AST Diff)
+      +---------------+
+              |
+              v
+       [STORAGE ENGINE]
+       (SQLite / redb)
+
+
+Core Components
+---------------
+
+1. PTY Proxy (src/cli_commands/run.rs):
+   Wraps the agent in a pseudo-terminal to preserve native ANSI colors, 
+   progress bars, and interactive features while sniffing bytes.
+
+2. In-flight Memory (src/cli_commands/run.rs):
+   Whispers project history and the command guide directly into the agent's 
+   ear (stdin) on the very first prompt.
+
+3. Semantic Sniffer (src/semantic/):
+   Translates raw file writes into human-readable AST changes 
+   (e.g., "Added struct Storage").
+
+4. Unified Storage (src/storage/):
+   Local-first SQLite for session metadata and Zstd-compressed redb 
+   for file snapshots.
+
+
+Persistent State (.shai/)
+-------------------------
+
+timeline.sqlite
+  - sessions (History, prompts, LLM info)
+  - changes  (File paths, tool names, AST summaries)
+
+blobs.redb
+  - Compressed content blobs indexed by hash
+
+project_id
+  - Stable UUID for cross-environment memory syncing
+
+
+Philosophical Goal
+------------------
+
+Become an "Invisible Brain" for terminal agents. 100% functionality with 
+0% physical footprint in the user's project repository.

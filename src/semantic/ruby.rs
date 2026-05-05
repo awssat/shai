@@ -1,0 +1,69 @@
+use crate::semantic::common::{push_parsed_node, ParsedNode};
+use tree_sitter::{Node, Parser};
+
+pub(crate) fn parse_ruby_ast(source_code: &str) -> Option<Vec<ParsedNode>> {
+    let mut parser = Parser::new();
+    parser.set_language(&tree_sitter_ruby::LANGUAGE.into()).ok()?;
+    let tree = parser.parse(source_code, None)?;
+    let mut nodes = Vec::new();
+    visit_ruby_node(tree.root_node(), source_code, None, &mut nodes);
+    Some(nodes)
+}
+
+fn visit_ruby_node(node: Node, source: &str, scope: Option<String>, nodes: &mut Vec<ParsedNode>) {
+    match node.kind() {
+        "class" | "module" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = name_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+                if !name.is_empty() {
+                    let id = scope
+                        .clone()
+                        .map(|s| format!("{}::{}", s, name))
+                        .unwrap_or_else(|| name.clone());
+                    push_parsed_node(
+                        nodes,
+                        id.clone(),
+                        "struct_def",
+                        None,
+                        None, // Ruby classes don't have a single explicit 'body' node usually
+                        source,
+                    );
+                    let mut cursor = node.walk();
+                    for child in node.named_children(&mut cursor) {
+                        visit_ruby_node(child, source, Some(id.clone()), nodes);
+                    }
+                    return;
+                }
+            }
+        }
+        "method" | "singleton_method" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = name_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+                if !name.is_empty() {
+                    let id = scope
+                        .clone()
+                        .map(|s| format!("{}#{}", s, name)) // Ruby uses # for instance methods, but whatever
+                        .unwrap_or_else(|| name.clone());
+                    push_parsed_node(
+                        nodes,
+                        id,
+                        if scope.is_some() {
+                            "impl_method"
+                        } else {
+                            "free_function"
+                        },
+                        node.child_by_field_name("parameters"),
+                        node.child_by_field_name("body"),
+                        source,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        visit_ruby_node(child, source, scope.clone(), nodes);
+    }
+}

@@ -1,0 +1,67 @@
+[package]
+name        = "shai"
+version     = "0.1.0"
+edition     = "2021"
+description = "Project-local memory layer for AI-assisted development"
+license     = "MIT"
+repository  = "https://github.com/awssat/shai"
+homepage    = "https://github.com/awssat/shai"
+readme      = "README.md"
+keywords    = ["ai", "mcp", "memory", "developer-tools"]
+categories  = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "shai"
+path = "src/main.rs"
+
+[dependencies]
+base64   = "0.22"
+redb     = "3.1"
+regex    = "1.11"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+tree-sitter      = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23.5"
+tree-sitter-typescript = "0.23"
+
+which = "6"
+similar = "2.6"
+ignore  = "0.4"
+globset = "0.4"
+uuid = { version = "1.10", features = ["v4"] }
+zstd = "0.13"
+blake3 = "1.8"
+
+clap       = { version = "4.5", features = ["derive"] }
+dirs       = "5"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+portable-pty = "0.9"
+crossterm = "0.28"
+tokio = { version = "1", features = ["full", "macros"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-swift = "0.7.1"
+tree-sitter-md = "0.5.3"
+tree-sitter-kotlin-ng = "1.1.0"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+panic         = "abort"
+strip         = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
