@@ -2,7 +2,7 @@ pub(super) fn agent_identity(llm: &str) -> (String, String) {
     match llm {
         "claude" => ("anthropic".to_string(), "claude-code".to_string()),
         "gemini" => ("google".to_string(), "gemini-cli".to_string()),
-        "ghcs" | "copilot" => ("github".to_string(), "copilot-cli".to_string()),
+        "copilot" => ("github".to_string(), "copilot-cli".to_string()),
         _ => ("generic".to_string(), llm.to_string()),
     }
 }

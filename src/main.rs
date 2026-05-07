@@ -31,7 +31,7 @@ enum AdapterCommands {
 enum Commands {
     /// Run a CLI agent inside a Shai container to auto-audit traffic
     Run {
-        /// The agent command to execute (e.g. claude, ghcs)
+        /// The agent command to execute (e.g. claude, copilot)
         command: String,
         /// Arguments to pass to the agent
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
