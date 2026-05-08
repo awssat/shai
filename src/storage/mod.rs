@@ -6,6 +6,7 @@ mod content_store;
 mod export_import;
 mod helpers;
 mod history;
+mod memory;
 mod schema;
 mod search;
 mod sessions;
@@ -16,8 +17,6 @@ mod types;
 use self::content_store::RedbContentStore;
 use self::types::open_wal_connection;
 pub use self::types::*;
-
-pub(super) const UNRECORDED_PROMPT: &str = "(unrecorded prompt)";
 
 impl Storage {
     pub fn open(shai_dir: &std::path::Path) -> Self {
@@ -38,7 +37,10 @@ impl Storage {
     }
 
     pub fn project_root(&self) -> PathBuf {
-        self.shai_dir.parent().unwrap_or(&self.shai_dir).to_path_buf()
+        self.shai_dir
+            .parent()
+            .unwrap_or(&self.shai_dir)
+            .to_path_buf()
     }
 
     pub fn get_project_id(&self) -> String {
@@ -68,7 +70,10 @@ impl Storage {
     }
 
     fn generate_and_save_project_id(&self, path: &std::path::Path) -> String {
-        let id = format!("project_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+        let id = format!(
+            "project_{}",
+            uuid::Uuid::new_v4().to_string().replace('-', "")
+        );
         let _ = std::fs::write(path, &id);
         id
     }

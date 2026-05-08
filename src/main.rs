@@ -1,4 +1,4 @@
-mod adapters;
+mod agents;
 mod cli_commands;
 mod context;
 mod discovery;
@@ -25,6 +25,43 @@ struct Cli {
 enum AdapterCommands {
     /// Show built-in adapters plus any project-local custom adapters
     List,
+}
+
+#[derive(Subcommand)]
+enum MemoryCommands {
+    /// Record a durable project fact
+    AddFact {
+        key: String,
+        content: String,
+        #[arg(long, default_value = "manual")]
+        source: String,
+        #[arg(long)]
+        unverified: bool,
+        #[arg(long)]
+        global: bool,
+    },
+    /// Record a durable project decision
+    AddDecision {
+        title: String,
+        rationale: String,
+        #[arg(long, default_value = "")]
+        alternatives: String,
+        #[arg(long, default_value = "active")]
+        status: String,
+        #[arg(long)]
+        unverified: bool,
+        #[arg(long)]
+        global: bool,
+    },
+    /// Show ranked durable memory for the current project
+    List {
+        #[arg(short, long, default_value_t = 20)]
+        limit: u32,
+    },
+    /// Mark a recorded fact as verified
+    VerifyFact { id: i64 },
+    /// Mark a recorded decision as verified
+    VerifyDecision { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -67,6 +104,21 @@ enum Commands {
         /// Steps back (default 1 = last save)
         #[arg(short, long, default_value_t = 1)]
         steps: u32,
+    },
+    /// Record an explicit checkpoint in the current or ad-hoc session
+    Checkpoint {
+        /// Human-readable checkpoint label
+        label: String,
+    },
+    /// Show the unified project event stream
+    Timeline {
+        #[arg(short, long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Replay the unified project event stream
+    Replay {
+        #[arg(short, long, default_value_t = 50)]
+        limit: u32,
     },
     /// Search prompts, file paths, and change summaries
     Search {
@@ -116,10 +168,24 @@ enum Commands {
         /// Input archive file path
         input: String,
     },
+    /// Manage durable project memory
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
+    },
     /// Inspect adapter support and project-local custom adapter overrides
     Adapters {
         #[command(subcommand)]
         command: AdapterCommands,
+    },
+    /// Internal: intercept a shell command from a PATH guard wrapper
+    #[command(hide = true)]
+    GuardExec {
+        /// The command name being intercepted (e.g. rm, git)
+        name: String,
+        /// Arguments to forward to the real binary
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -143,6 +209,9 @@ async fn main() -> Result<(), String> {
         Commands::Log { file, limit } => cli_commands::cmd_log(&file, limit),
         Commands::Rollback { file, steps } => cli_commands::cmd_rollback(&file, steps),
         Commands::Diff { file, steps } => cli_commands::cmd_diff(&file, steps),
+        Commands::Checkpoint { label } => cli_commands::cmd_checkpoint(&label),
+        Commands::Timeline { limit } => cli_commands::cmd_timeline(limit),
+        Commands::Replay { limit } => cli_commands::cmd_replay(limit),
         Commands::Search { query, limit, mode } => cli_commands::cmd_search(&query, limit, &mode),
         Commands::Summary => cli_commands::cmd_summary(),
         Commands::Why { path } => cli_commands::cmd_why(&path),
@@ -159,9 +228,37 @@ async fn main() -> Result<(), String> {
         } => cli_commands::cmd_gc(days, delete, dry_run),
         Commands::Export { output } => cli_commands::cmd_export(&output),
         Commands::Import { input } => cli_commands::cmd_import(&input),
+        Commands::Memory { command } => match command {
+            MemoryCommands::AddFact {
+                key,
+                content,
+                source,
+                unverified,
+                global,
+            } => cli_commands::cmd_memory_add_fact(&key, &content, &source, !unverified, global),
+            MemoryCommands::AddDecision {
+                title,
+                rationale,
+                alternatives,
+                status,
+                unverified,
+                global,
+            } => cli_commands::cmd_memory_add_decision(
+                &title,
+                &rationale,
+                &alternatives,
+                &status,
+                !unverified,
+                global,
+            ),
+            MemoryCommands::List { limit } => cli_commands::cmd_memory_list(limit),
+            MemoryCommands::VerifyFact { id } => cli_commands::cmd_memory_verify_fact(id),
+            MemoryCommands::VerifyDecision { id } => cli_commands::cmd_memory_verify_decision(id),
+        },
         Commands::Adapters { command } => match command {
             AdapterCommands::List => cli_commands::cmd_adapters_list(),
         },
+        Commands::GuardExec { name, args } => cli_commands::cmd_guard_exec(name, args),
     }
 
     Ok(())

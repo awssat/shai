@@ -1,3 +1,4 @@
 target/
 build.log
 .shai/
+.github/copilot-instructions.md

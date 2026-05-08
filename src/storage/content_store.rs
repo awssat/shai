@@ -29,8 +29,8 @@ impl RedbContentStore {
     }
 
     fn primary_db(&self) -> Option<&Database> {
-        self.primary_db.get_or_init(|| {
-            match Database::create(&self.primary_path) {
+        self.primary_db
+            .get_or_init(|| match Database::create(&self.primary_path) {
                 Ok(db) => Some(db),
                 Err(err) => {
                     tracing::error!(
@@ -40,8 +40,8 @@ impl RedbContentStore {
                     );
                     None
                 }
-            }
-        }).as_ref()
+            })
+            .as_ref()
     }
 
     fn open_db(path: &std::path::Path) -> Option<Database> {

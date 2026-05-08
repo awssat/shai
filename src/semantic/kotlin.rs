@@ -3,7 +3,9 @@ use tree_sitter::{Node, Parser};
 
 pub(crate) fn parse_kotlin_ast(source_code: &str) -> Option<Vec<ParsedNode>> {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_kotlin_ng::LANGUAGE.into()).ok()?;
+    parser
+        .set_language(&tree_sitter_kotlin_ng::LANGUAGE.into())
+        .ok()?;
     let tree = parser.parse(source_code, None)?;
     let mut nodes = Vec::new();
     visit_kotlin_node(tree.root_node(), source_code, None, &mut nodes);
@@ -14,7 +16,10 @@ fn visit_kotlin_node(node: Node, source: &str, scope: Option<String>, nodes: &mu
     match node.kind() {
         "class_declaration" | "object_declaration" => {
             if let Some(name_node) = node.child_by_field_name("identifier") {
-                let name = name_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+                let name = name_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
                 if !name.is_empty() {
                     let id = scope
                         .clone()
@@ -40,7 +45,10 @@ fn visit_kotlin_node(node: Node, source: &str, scope: Option<String>, nodes: &mu
         }
         "function_declaration" => {
             if let Some(name_node) = node.child_by_field_name("identifier") {
-                let name = name_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+                let name = name_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
                 if !name.is_empty() {
                     let id = scope
                         .clone()

@@ -1,5 +1,5 @@
-use crate::storage::SessionRecord;
 use super::types::ContextProfile;
+use crate::storage::SessionRecord;
 use std::path::Path;
 
 pub fn project_summary_report(
@@ -8,7 +8,7 @@ pub fn project_summary_report(
     _profile: ContextProfile,
 ) -> String {
     let mut out = String::from("Project History Summary:\n");
-    
+
     if let Some(branch) = crate::cli_commands::shared::get_current_git_branch(repo_root) {
         out.push_str(&format!("Current Branch: {}\n", branch));
     }
@@ -19,9 +19,15 @@ pub fn project_summary_report(
         return out;
     }
     for session in history.iter().take(5) {
-        out.push_str(&format!("- [{}] \"{}\"\n", session.started_at, session.prompt));
+        out.push_str(&format!(
+            "- [{}] \"{}\"\n",
+            session.started_at, session.prompt
+        ));
         for change in session.changes.iter().take(3) {
-            out.push_str(&format!("  ↳ {} — {}\n", change.file_path, change.ast_summary));
+            out.push_str(&format!(
+                "  ↳ {} — {}\n",
+                change.file_path, change.ast_summary
+            ));
         }
     }
     out
@@ -37,7 +43,10 @@ pub fn why_file_report(
     for session in history {
         for change in &session.changes {
             if change.file_path.contains(file_path) {
-                out.push_str(&format!("- [{}] \"{}\": {}\n", session.started_at, session.prompt, change.ast_summary));
+                out.push_str(&format!(
+                    "- [{}] \"{}\": {}\n",
+                    session.started_at, session.prompt, change.ast_summary
+                ));
                 found = true;
                 break;
             }

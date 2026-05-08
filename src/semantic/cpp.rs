@@ -3,7 +3,9 @@ use tree_sitter::{Node, Parser};
 
 pub(crate) fn parse_cpp_ast(source_code: &str) -> Option<Vec<ParsedNode>> {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).ok()?;
+    parser
+        .set_language(&tree_sitter_cpp::LANGUAGE.into())
+        .ok()?;
     let tree = parser.parse(source_code, None)?;
     let mut nodes = Vec::new();
     visit_cpp_node(tree.root_node(), source_code, None, &mut nodes);
@@ -37,7 +39,10 @@ fn visit_cpp_node(node: Node, source: &str, scope: Option<String>, nodes: &mut V
         }
         "class_specifier" | "struct_specifier" => {
             if let Some(name_node) = node.child_by_field_name("name") {
-                let name = name_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+                let name = name_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
                 if !name.is_empty() {
                     let id = scope
                         .clone()
@@ -63,7 +68,10 @@ fn visit_cpp_node(node: Node, source: &str, scope: Option<String>, nodes: &mut V
         }
         "namespace_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
-                let name = name_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+                let name = name_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
                 if !name.is_empty() {
                     let id = scope
                         .clone()
@@ -89,7 +97,10 @@ fn visit_cpp_node(node: Node, source: &str, scope: Option<String>, nodes: &mut V
 }
 
 fn extract_cpp_identifier(node: Node, source: &str) -> String {
-    if node.kind() == "identifier" || node.kind() == "field_identifier" || node.kind() == "type_identifier" {
+    if node.kind() == "identifier"
+        || node.kind() == "field_identifier"
+        || node.kind() == "type_identifier"
+    {
         return node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
     }
     if node.kind() == "function_declarator" {

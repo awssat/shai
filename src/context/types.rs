@@ -4,5 +4,4 @@ pub enum ContextProfile {
     Standard,
 }
 
-impl ContextProfile {
-}
+impl ContextProfile {}

@@ -1,5 +1,5 @@
-use std::io::BufWriter;
 use super::shared::local_shai_or_die;
+use std::io::BufWriter;
 
 pub(crate) fn cmd_gc(days: u32, delete: bool, dry_run: bool) {
     let (_shai_dir, db) = local_shai_or_die();
@@ -15,10 +15,24 @@ pub(crate) fn cmd_gc(days: u32, delete: bool, dry_run: bool) {
     }
 
     let action = if dry_run {
-        if delete { "would delete" } else { "would archive" }
-    } else if delete { "deleted" } else { "archived" };
+        if delete {
+            "would delete"
+        } else {
+            "would archive"
+        }
+    } else if delete {
+        "deleted"
+    } else {
+        "archived"
+    };
 
-    println!("  {}  {} blob(s) ({:.1} MB) {}", if dry_run { "ℹ️ " } else { "✅ " }, result.blob_count, result.bytes_freed as f64 / 1_048_576.0, action);
+    println!(
+        "  {}  {} blob(s) ({:.1} MB) {}",
+        if dry_run { "ℹ️ " } else { "✅ " },
+        result.blob_count,
+        result.bytes_freed as f64 / 1_048_576.0,
+        action
+    );
 }
 
 pub(crate) fn cmd_export(output_path: &str) {
@@ -33,7 +47,8 @@ pub(crate) fn cmd_export(output_path: &str) {
         Ok(stats) => {
             println!("shai export\n");
             println!("  sessions exported   {}", stats.sessions);
-            println!("  changes exported    {}", stats.changes);
+            println!("  events exported     {}", stats.events);
+            println!("  memory exported     {}", stats.memory_records);
         }
         Err(err) => eprintln!("❌ Export failed: {}", err),
     }
@@ -49,6 +64,8 @@ pub(crate) fn cmd_import(input_path: &str) {
         Ok(stats) => {
             println!("shai import\n");
             println!("  sessions imported   {}", stats.sessions_inserted);
+            println!("  events imported     {}", stats.events_inserted);
+            println!("  memory imported     {}", stats.memory_records_inserted);
         }
         Err(err) => eprintln!("❌ Import failed: {}", err),
     }

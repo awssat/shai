@@ -2,7 +2,7 @@
 
 > **⚠️ Experimental:** This is an active research project. Things may break.
 
-**Shai is a shared memory layer for AI coding agents.** It records everything your agents do in a project—every file change, every tool call, every decision—and makes that history available to any agent you use.
+**Shai is a project-local memory layer for CLI coding agents.** It records prompts, tool activity, file snapshots, checkpoints, guard decisions, and durable project memory in `.shai/`, then makes that history available across supported agents.
 
 ## The Problem: Git Isn't Enough
 
@@ -27,32 +27,35 @@ You start a feature with Claude, continue with Gemini, debug with Copilot. Each 
 
 ## The Solution: Portable Project Memory
 
-Shai gives all your agents the same memory. They can all:
+Shai gives your supported agents the same memory. They can:
 - See what happened in previous sessions (across all agents)
 - Understand why files were changed
 - Search through the complete project history
 - Roll back mistakes intelligently
 
-Switch agents mid-task? No problem. The next agent automatically gets the full context.
+Switch agents mid-task? No problem. The next supported agent starts with the same project context.
 
 ## How It Works
 
-Shai runs as a transparent wrapper around your favorite AI agents:
+Shai runs as a transparent wrapper around supported CLI agents:
 
 ```bash
-# Use any agent - they all get the same memory
+# Use supported agents with shared project memory
 shai run claude
 shai run gemini
 shai run copilot
+shai run goose session -n my-project
+shai run kilo run "continue the refactor"
 shai run opencode
 shai run junie
 ```
 
 Behind the scenes, Shai:
-1. **Records** every tool call and file change to a local database (`.shai/`)
+1. **Records** prompts, tool calls, file snapshots, checkpoints, and guard decisions to a local database (`.shai/`)
 2. **Summarizes** changes into human-readable descriptions (e.g., "Added authentication middleware")
-3. **Injects** relevant history into each new agent session
-4. **Preserves** your normal workflow—agents work exactly as before
+3. **Injects** relevant history into each supported agent using its native integration path
+4. **Guards** observable risky shell commands and snapshots simple file targets before destructive actions when possible
+5. **Preserves** your normal workflow—agents work exactly as before
 
 The agent gets smarter immediately, knowing what happened before. You get continuity across all your tools.
 
@@ -80,24 +83,29 @@ curl -fsSL https://raw.githubusercontent.com/awssat/shai/main/install.sh | sh
 shai run claude      # Works with Claude Code
 shai run gemini     # Works with Gemini CLI
 shai run copilot    # Works with GitHub Copilot CLI
+shai run goose session -n my-project  # Works with Goose
+shai run kilo run "fix the failing test"  # Works with Kilo
 shai run opencode   # Works with OpenCode
 shai run junie      # Works with JetBrains Junie
 ```
 
-That's it. The agent now knows your project history.
+That's it. A supported agent session now starts with your project history and durable memory.
 
 ## Core Commands
 
 | Command | Purpose |
 |---|---|
-| `shai run <agent>` | Run any AI agent with project memory |
-| `shai history` | See everything that happened across all sessions |
+| `shai run <agent>` | Run a supported CLI agent with project memory and guardrails |
+| `shai history` | See recent sessions and their recorded changes |
+| `shai timeline` / `replay` | Render the canonical project event stream |
 | `shai search "<query>"` | Find specific changes in project history |
 | `shai log <file>` | See the complete evolution of a specific file |
 | `shai summary` | Get a quick digest of recent project activity |
 | `shai why <file>` | Understand why a file was changed |
 | `shai diff <file>` | Preview a rollback before applying it |
 | `shai rollback <file>` | Restore a file to any previous version |
+| `shai checkpoint "<label>"` | Record an explicit milestone in the timeline |
+| `shai memory ...` | Record, verify, and inspect durable facts and decisions |
 | `shai status` | Check database size and health |
 | `shai analytics` | See which files/tools are used most |
 | `shai export` / `import` | Share project memory with your team |
@@ -123,22 +131,35 @@ Each agent sees what the others did. No context loss.
 
 ## How Agents Get Context
 
-Shai automatically adapts to each agent's native integration method:
+Shai automatically adapts to each supported agent's native integration method:
 
 | Agent | Integration Method |
 |-------|-------------------|
 | Claude | `--append-system-prompt-file` flag |
 | Gemini | `GEMINI_SYSTEM_MD` environment variable |
 | Copilot | `.github/copilot-instructions.md` file |
+| Goose | `GOOSE_MOIM_MESSAGE_FILE` environment variable |
+| Kilo | `AGENTS.md` at the project root |
 | OpenCode | `--system` flag |
 | Junie | `--skill-location` flag |
-| Others | Stdin injection (fallback) |
+| Other CLI agents | `.shai/skills/shai-context.md` is written for manual sharing |
 
 Each agent gets:
+- Ranked durable project memory for the current branch
 - Last 20 sessions (compact summary)
 - Tool descriptions for `shai` commands
 - Recent project history
 - Ability to query full history via commands
+
+For agent CLIs that Shai does not recognize yet, Shai still wraps the process, records observable activity, applies shell guardrails, and writes `.shai/skills/shai-context.md` so you can pass the context in manually.
+
+Generic sniffing is still best-effort for unrecognized agents: Shai understands several common JSON tool-call shapes and now warns when it sees tool-like payloads it cannot classify, but non-standard formats can still reduce file and shell capture.
+
+Shai is intentionally **CLI-only**. GUI agents and editor-integrated runtimes such as VS Code sidebars are outside `shai run`'s PTY model.
+
+**Ctrl+C behaviour:** one press is forwarded to the agent (cancels generation). Some agents need two. Press **Ctrl+C three times rapidly** (within 2 s) to force-kill an unresponsive agent.
+
+**Copilot instructions file:** `.github/copilot-instructions.md` is runtime-generated by `shai run copilot` and is git-ignored automatically. Do not commit it.
 
 ## Example Workflow
 

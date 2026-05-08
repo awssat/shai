@@ -1,5 +1,44 @@
-use crate::search_output;
 use super::shared::{local_shai_or_die, parse_search_mode};
+use crate::search_output;
+use uuid::Uuid;
+
+fn event_icon(event_kind: &str) -> &'static str {
+    match event_kind {
+        "session_started" => "▶",
+        "prompt_submitted" => "✎",
+        "tool_called" => "⚙",
+        "file_snapshot" => "↳",
+        "checkpoint_created" => "⟡",
+        "guard_blocked" => "⚠",
+        "guard_allowed" => "✓",
+        "error_emitted" => "✖",
+        "session_closed" => "■",
+        _ => "•",
+    }
+}
+
+fn render_event_suffix(event: &crate::storage::TimelineEventRecord) -> String {
+    let mut parts = Vec::new();
+    if let Some(file_path) = &event.file_path {
+        parts.push(file_path.clone());
+    }
+    if let Some(tool_name) = &event.tool_name {
+        parts.push(format!("tool={}", tool_name));
+    }
+    if let Some(blob_hash) = &event.blob_hash {
+        let short_hash = if blob_hash.len() > 8 {
+            &blob_hash[..8]
+        } else {
+            blob_hash.as_str()
+        };
+        parts.push(format!("blob={}", short_hash));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
+}
 
 pub(crate) fn cmd_history(limit: u32, file: Option<String>) {
     let (_, db) = local_shai_or_die();
@@ -16,12 +55,33 @@ pub(crate) fn cmd_history(limit: u32, file: Option<String>) {
     }
     for s in &history {
         println!("[{}][{}] \"{}\"", s.started_at, s.llm, s.prompt);
-        for c in &s.changes {
-            let short_hash = if c.blob_hash.len() > 8 { &c.blob_hash[..8] } else { &c.blob_hash };
-            println!(
-                "  ↳ [{}] [{}] {} — {}",
-                c.timestamp, short_hash, c.file_path, c.ast_summary
-            );
+        for event in db.get_session_timeline(s.id) {
+            match event.event_kind.as_str() {
+                "file_snapshot" => {
+                    let Some(file_path) = event.file_path.as_deref() else {
+                        continue;
+                    };
+                    let short_hash = event
+                        .blob_hash
+                        .as_deref()
+                        .map(|hash| if hash.len() > 8 { &hash[..8] } else { hash })
+                        .unwrap_or("--------");
+                    println!(
+                        "  ↳ [{}] [{}] {} — {}",
+                        event.timestamp, short_hash, file_path, event.summary
+                    );
+                }
+                "checkpoint_created" => {
+                    println!("  ⟡ [{}] checkpoint — {}", event.timestamp, event.summary);
+                }
+                "guard_blocked" => {
+                    println!("  ⚠ [{}] blocked — {}", event.timestamp, event.summary);
+                }
+                "guard_allowed" => {
+                    println!("  ✓ [{}] allowed — {}", event.timestamp, event.summary);
+                }
+                _ => {}
+            }
         }
         println!();
     }
@@ -39,8 +99,15 @@ pub(crate) fn cmd_log(file: &str, limit: u32) {
     for c in history {
         let prompt = c.prompt.unwrap_or_else(|| "(no prompt)".to_string());
         let llm = c.llm.unwrap_or_else(|| "unknown".to_string());
-        let short_hash = if c.blob_hash.len() > 8 { &c.blob_hash[..8] } else { &c.blob_hash };
-        println!("[{}][{}] [{}] \"{}\"\n  ↳ {} ({})", c.timestamp, llm, short_hash, prompt, c.ast_summary, c.tool_name);
+        let short_hash = if c.blob_hash.len() > 8 {
+            &c.blob_hash[..8]
+        } else {
+            &c.blob_hash
+        };
+        println!(
+            "[{}][{}] [{}] \"{}\"\n  ↳ {} ({})",
+            c.timestamp, llm, short_hash, prompt, c.ast_summary, c.tool_name
+        );
     }
 }
 
@@ -100,7 +167,52 @@ pub(crate) fn cmd_diff(file: &str, steps: u32) {
 pub(crate) fn cmd_search(query: &str, limit: u32, mode: &str) {
     let (_, db) = local_shai_or_die();
     let results = db.search_with_mode(query, limit, parse_search_mode(mode));
-    println!("{}", search_output::format_search_results(query, mode, &results));
+    println!(
+        "{}",
+        search_output::format_search_results(query, mode, &results)
+    );
+}
+
+pub(crate) fn cmd_checkpoint(label: &str) {
+    let (_, db) = local_shai_or_die();
+    let session_key =
+        std::env::var("SHAI_SESSION_ID").unwrap_or_else(|_| format!("manual-{}", Uuid::new_v4()));
+    let llm = std::env::var("SHAI_AGENT").unwrap_or_else(|_| "manual".to_string());
+
+    db.open_session(&session_key, "", &llm, None);
+    match db.record_checkpoint(&session_key, &llm, label) {
+        Ok(event_id) => {
+            println!("SHAI_EVENT_OK checkpoint_created {}", event_id);
+            println!("✅ checkpoint recorded: {}", label);
+        }
+        Err(err) => eprintln!("❌ Failed to record checkpoint: {}", err),
+    }
+}
+
+pub(crate) fn cmd_timeline(limit: u32) {
+    let (_, db) = local_shai_or_die();
+    let timeline = db.get_project_timeline(limit);
+    if timeline.is_empty() {
+        println!("No timeline events recorded yet.");
+        return;
+    }
+
+    println!("shai timeline\n");
+    for row in timeline {
+        println!(
+            "{} [{}][{}:{}] {}{}",
+            event_icon(&row.event.event_kind),
+            row.event.timestamp,
+            row.llm,
+            row.session_key,
+            row.event.summary,
+            render_event_suffix(&row.event)
+        );
+    }
+}
+
+pub(crate) fn cmd_replay(limit: u32) {
+    cmd_timeline(limit);
 }
 
 pub fn build_rollback_diff(

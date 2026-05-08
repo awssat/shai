@@ -1,11 +1,13 @@
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use serde::{Serialize, Deserialize};
 
 pub(super) fn open_wal_connection(shai_dir: &std::path::Path) -> Connection {
     let conn = Connection::open(shai_dir.join("timeline.sqlite")).expect("Failed to open SQLite");
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;")
-        .expect("Failed to enable WAL mode");
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;",
+    )
+    .expect("Failed to enable WAL mode");
     conn
 }
 
@@ -22,11 +24,21 @@ pub enum StorageConn<'a> {
 
 impl<'a> std::ops::Deref for StorageConn<'a> {
     type Target = Connection;
-    fn deref(&self) -> &Self::Target { match self { Self::Owned(conn) => conn, _ => unreachable!() } }
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(conn) => conn,
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl<'a> std::ops::DerefMut for StorageConn<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target { match self { Self::Owned(conn) => conn, _ => unreachable!() } }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Owned(conn) => conn,
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -44,7 +56,15 @@ impl BlobLoadError {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchMode {
+    All,
+    Prompt,
+    Summary,
+    Path,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SessionRecord {
     pub id: i64,
     pub session_key: String,
@@ -54,7 +74,7 @@ pub struct SessionRecord {
     pub changes: Vec<ChangeRecord>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ChangeRecord {
     pub file_path: String,
     pub blob_hash: String,
@@ -65,8 +85,74 @@ pub struct ChangeRecord {
     pub agent_name: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SearchMode { All, Prompt, Summary, Path }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TimelineEventRecord {
+    pub id: i64,
+    pub project_id: String,
+    pub session_id: i64,
+    pub seq_in_session: i64,
+    pub event_kind: String,
+    pub timestamp: String,
+    pub actor_family: String,
+    pub actor_name: String,
+    pub file_path: Option<String>,
+    pub blob_hash: Option<String>,
+    pub tool_name: Option<String>,
+    pub summary: String,
+    pub payload_json: Option<String>,
+    pub raw_bytes: u64,
+    pub stored_bytes: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExportEventRecord {
+    pub session_key: String,
+    pub llm: String,
+    pub started_at: String,
+    pub closed_at: Option<String>,
+    pub event: TimelineEventRecord,
+    pub blob_content_base64: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MemoryFactRecord {
+    pub id: i64,
+    pub project_id: String,
+    pub fact_key: String,
+    pub content: String,
+    pub verified: bool,
+    pub source: String,
+    pub created_at: String,
+    pub branch_refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MemoryDecisionRecord {
+    pub id: i64,
+    pub project_id: String,
+    pub title: String,
+    pub rationale: String,
+    pub alternatives: String,
+    pub status: String,
+    pub verified: bool,
+    pub created_at: String,
+    pub branch_refs: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "record_type", rename_all = "snake_case")]
+pub enum ExportRecord {
+    Event(ExportEventRecord),
+    MemoryFact(MemoryFactRecord),
+    MemoryDecision(MemoryDecisionRecord),
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectTimelineRecord {
+    pub session_key: String,
+    pub llm: String,
+    pub event: TimelineEventRecord,
+}
 
 pub struct FileChangeRecord {
     pub timestamp: String,
@@ -87,6 +173,8 @@ pub struct StatusInfo {
     pub stored_bytes: u64,
     pub compression_ratio: f64,
     pub last_prompt: Option<String>,
+    pub last_checkpoint: Option<String>,
+    pub last_checkpoint_at: Option<String>,
     pub last_at: Option<String>,
     pub last_change_at: Option<String>,
     pub first_at: Option<String>,
@@ -133,4 +221,23 @@ pub struct AnalyticsInfo {
 pub struct GcResult {
     pub blob_count: usize,
     pub bytes_freed: u64,
+}
+
+pub struct ExportStats {
+    pub sessions: usize,
+    pub events: usize,
+    pub memory_records: usize,
+}
+
+pub struct ImportStats {
+    pub sessions_inserted: usize,
+    pub events_inserted: usize,
+    pub memory_records_inserted: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryVerifyOutcome {
+    Verified,
+    AlreadyVerified,
+    NotFound,
 }

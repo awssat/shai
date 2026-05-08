@@ -13,23 +13,24 @@ pub(crate) fn parse_markdown_ast(source_code: &str) -> Option<Vec<ParsedNode>> {
 fn visit_markdown_node(node: Node, source: &str, nodes: &mut Vec<ParsedNode>) {
     if node.kind() == "atx_heading" || node.kind() == "setext_heading" {
         if let Some(heading_content) = node.child_by_field_name("heading_content") {
-            let name = heading_content.utf8_text(source.as_bytes()).unwrap_or("").trim().to_string();
+            let name = heading_content
+                .utf8_text(source.as_bytes())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if !name.is_empty() {
-                push_parsed_node(
-                    nodes,
-                    name,
-                    "markdown_heading",
-                    None,
-                    None,
-                    source,
-                );
+                push_parsed_node(nodes, name, "markdown_heading", None, None, source);
             }
         } else {
             // fallback if tree-sitter-md exposes it differently
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
                 if child.kind() == "inline" || child.kind() == "paragraph" {
-                    let name = child.utf8_text(source.as_bytes()).unwrap_or("").trim().to_string();
+                    let name = child
+                        .utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if !name.is_empty() {
                         push_parsed_node(nodes, name, "markdown_heading", None, None, source);
                         break;

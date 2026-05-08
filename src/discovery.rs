@@ -1,10 +1,10 @@
 use std::fmt::Write;
 use std::path::Path;
 
-use crate::adapters;
+use crate::agents;
 
-pub(crate) fn render_adapter_inventory(start: &Path) -> String {
-    let adapters = adapters::list_adapters_for(start);
+pub(crate) fn render_adapter_inventory(_start: &Path) -> String {
+    let adapters = agents::list_adapters();
 
     let mut out = String::with_capacity(1024);
     let _ = writeln!(out, "shai adapters\n");

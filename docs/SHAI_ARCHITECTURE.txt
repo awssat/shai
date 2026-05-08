@@ -1,64 +1,88 @@
-Shai Ghost Engine Architecture
-==============================
+Shai runtime architecture
+=========================
 
        [USER TERMINAL]
               |
+         Ctrl+C ×3 → SIGKILL
               v
        [SHAI RUN WRAPPER]
        (crossterm / pty)
               |
-      +-------+-------+
-      |               |
-[STDIN PROXY]   [STDOUT SNIFFER]
-      |               |
-      | (Memory Inj)  | (Balanced JSON Scan)
-      v               v
- [CLI AGENT]    [BACKGROUND WORKER]
- (Claude/Gemini)      |
-      |               | (Stabilization / AST Diff)
-      +---------------+
-              |
-              v
-       [STORAGE ENGINE]
-       (SQLite / redb)
+      +-------+-------------------+
+      |                           |
+[STDIN PROMPT PROXY]       [STDOUT / PTY SNIFFER]
+      |  (OSC sequences            |
+      |   stripped before          | (balanced JSON scan)
+      |   prompt storage)          v
+      v                      [BACKGROUND WORKER]
+ [CLI AGENT]                       |
+ (claude/goose/...)                | (stabilize file, AST summary,
+      |                            |  record timeline event)
+      |                            v
+      +--------------------->[STORAGE ENGINE]
+                              (SQLite / redb)
 
 
-Core Components
----------------
+Supporting paths
+----------------
 
-1. PTY Proxy (src/cli_commands/run.rs):
-   Wraps the agent in a pseudo-terminal to preserve native ANSI colors, 
-   progress bars, and interactive features while sniffing bytes.
+1. Agent plugin registry (build.rs + src/agents/):
+   At compile time, build.rs scans src/agents/*.rs and generates a static
+   GENERATED_REGISTRY of AgentPlugin trait objects. Each agent file exports
+   `pub(crate) static PLUGIN: <Type>`. Adding a new agent requires only one
+   file — no manual registry edits.
 
-2. In-flight Memory (src/cli_commands/run.rs):
-   Whispers project history and the command guide directly into the agent's 
-   ear (stdin) on the very first prompt.
+   Each plugin implements:
+   - skill_file()      — where to write the context document
+   - cmd_setup()       — how to launch the agent CLI with context injected
+   - merge_content()   — how to merge shai context with any existing content
 
-3. Semantic Sniffer (src/semantic/):
-   Translates raw file writes into human-readable AST changes 
-   (e.g., "Added struct Storage").
+   Integration methods in use:
+   - flag-based  : `--append-system-prompt-file` (Claude), `--system` (OpenCode)
+   - env-based   : GEMINI_SYSTEM_MD, GOOSE_MOIM_MESSAGE_FILE
+   - file-based  : AGENTS.md (Kilo), .github/copilot-instructions.md (Copilot)
+   - skill-based : --skill-location (Junie)
+   - fallback    : .shai/skills/shai-context.md written for manual sharing
 
-4. Unified Storage (src/storage/):
-   Local-first SQLite for session metadata and Zstd-compressed redb 
-   for file snapshots.
+2. PTY wrapper (src/cli_commands/run.rs):
+   Preserves normal interactive terminal behavior while observing prompts,
+   tool payloads, checkpoints, and agent output.
+   - STDIN proxy strips OSC terminal-query responses before storing prompts
+   - Triple Ctrl+C (within 2 s) sends SIGKILL to the child and its process group
+
+3. PATH guard wrappers (src/cli_commands/guard.rs):
+   Prepends wrapper binaries so observable shell commands like `rm`, `git`,
+   `mv`, `chmod`, and `chown` can be blocked or snapshotted before execution.
+
+4. JSON adapter layer (src/adapters/):
+   Translates agent-specific tool-call JSON shapes into (tool_name, command,
+   file_path) tuples for the sniffer. Known agents have dedicated adapters;
+   unknown agents fall back to GenericAdapter which covers ~10 common field
+   shapes and emits a one-time warning when it sees tool-like JSON it cannot
+   classify.
+
+5. Semantic summarization (src/semantic/):
+   Turns file snapshots into higher-signal summaries such as
+   "Added struct Storage" or "Modified method get_status".
+   Languages: Rust, Python, JS/TS, Go, Java, Kotlin, Ruby, Swift, C/C++, Markdown.
 
 
-Persistent State (.shai/)
+Persistent state (.shai/)
 -------------------------
 
 timeline.sqlite
-  - sessions (History, prompts, LLM info)
-  - changes  (File paths, tool names, AST summaries)
+  - sessions
+  - timeline_events
+  - memory_facts
+  - memory_decisions
+  - memory_refs
+  - internal_state
 
 blobs.redb
-  - Compressed content blobs indexed by hash
+  - Compressed content blobs (Zstd) indexed by BLAKE3 hash
+
+blobs_archive.redb
+  - Archived blobs moved by `shai gc`
 
 project_id
-  - Stable UUID for cross-environment memory syncing
-
-
-Philosophical Goal
-------------------
-
-Become an "Invisible Brain" for terminal agents. 100% functionality with 
-0% physical footprint in the user's project repository.
+  - Stable project identifier for export/import and shared history

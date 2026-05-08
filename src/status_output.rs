@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use crate::adapters;
+use crate::agents;
 use crate::storage::Storage;
 
 fn truncate_prompt(prompt: &str, max: usize) -> &str {
@@ -10,7 +10,7 @@ fn truncate_prompt(prompt: &str, max: usize) -> &str {
 pub(crate) fn render_status(storage: &Storage) -> String {
     let status = storage.get_status();
     let project_root = storage.project_root();
-    let adapters = adapters::list_adapters_for(&project_root);
+    let adapters = agents::list_adapters();
 
     let mut out = String::with_capacity(2048);
     let _ = writeln!(out, "shai project status\n");
@@ -41,6 +41,18 @@ pub(crate) fn render_status(storage: &Storage) -> String {
     }
     if let Some(prompt) = &status.last_prompt {
         let _ = writeln!(out, "  last prompt  \"{}\"", truncate_prompt(prompt, 72));
+    }
+    if let Some(checkpoint) = &status.last_checkpoint {
+        let when = status
+            .last_checkpoint_at
+            .as_deref()
+            .unwrap_or("unknown time");
+        let _ = writeln!(
+            out,
+            "  checkpoint   \"{}\" ({})",
+            truncate_prompt(checkpoint, 72),
+            when
+        );
     }
     if !status.top_agents.is_empty() {
         let summary = status

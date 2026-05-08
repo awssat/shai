@@ -3,7 +3,9 @@ use tree_sitter::{Node, Parser};
 
 pub(crate) fn parse_swift_ast(source_code: &str) -> Option<Vec<ParsedNode>> {
     let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_swift::LANGUAGE.into()).ok()?;
+    parser
+        .set_language(&tree_sitter_swift::LANGUAGE.into())
+        .ok()?;
     let tree = parser.parse(source_code, None)?;
     let mut nodes = Vec::new();
     visit_swift_node(tree.root_node(), source_code, None, &mut nodes);
@@ -12,9 +14,17 @@ pub(crate) fn parse_swift_ast(source_code: &str) -> Option<Vec<ParsedNode>> {
 
 fn visit_swift_node(node: Node, source: &str, scope: Option<String>, nodes: &mut Vec<ParsedNode>) {
     match node.kind() {
-        "class_declaration" | "struct_declaration" | "enum_declaration" | "protocol_declaration" | "extension_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("type") { // type_identifier
-                let name = name_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+        "class_declaration"
+        | "struct_declaration"
+        | "enum_declaration"
+        | "protocol_declaration"
+        | "extension_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("type") {
+                // type_identifier
+                let name = name_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
                 if !name.is_empty() {
                     let id = scope
                         .clone()
@@ -40,7 +50,10 @@ fn visit_swift_node(node: Node, source: &str, scope: Option<String>, nodes: &mut
         }
         "function_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
-                let name = name_node.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+                let name = name_node
+                    .utf8_text(source.as_bytes())
+                    .unwrap_or("")
+                    .to_string();
                 if !name.is_empty() {
                     let id = scope
                         .clone()

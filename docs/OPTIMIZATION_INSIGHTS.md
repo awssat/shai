@@ -1,6 +1,6 @@
 # Shai optimization insights
 
-This document lists optimizations that are actually visible in the current Ghost Engine codebase, plus the practical limits they still leave in place.
+This document lists optimizations that are actually visible in the current Shai codebase, plus the practical limits they still leave in place.
 
 ## Implemented optimizations
 
@@ -24,13 +24,13 @@ This document lists optimizations that are actually visible in the current Ghost
 ### Search and Context
 
 - **Budgeted Retrieval:** Search results and summary reports are strictly clipped to a character budget (e.g., 2,500 chars) to prevent overwhelming the AI's token limit.
-- **In-flight Injection:** Project memory is prepended to the user's first prompt in the stdin stream, avoiding the need for physical configuration files like `.claude.json`.
+- **Native Agent Injection:** Shai writes or passes context using the agent's supported file, flag, or environment-variable path when available.
 
 ## Real limits
 
 - **Local-first:** Database access is single-machine; concurrent access is handled by SQLite WAL mode but not distributed across a network.
 - **Disk Latency:** While sniffs are async, very high-frequency file writes (e.g., automated refactoring of thousands of files) may saturate the background worker's queue.
-- **Memory-only Injection:** Since context is injected via PTY stdin, GUI-based agents (like VS Code extensions not using the terminal) will not receive the automatic memory awakening unless they are run through `shai run`.
+- **CLI-only Runtime Wrapper:** GUI-based agents are outside `shai run`'s PTY model. Shai's current runtime integration is for terminal-launched agents.
 
 ## Operational Maintenance
 
