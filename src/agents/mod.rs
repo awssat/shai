@@ -200,7 +200,7 @@ mod tests {
     fn registry_discovers_all_agent_files() {
         assert_eq!(
             all_names(),
-            vec!["claude", "copilot", "gemini", "generic", "goose", "junie", "kilo", "opencode",]
+            vec!["claude", "cline", "copilot", "crush", "droid", "gemini", "generic", "goose", "junie", "kilo", "opencode",]
         );
         for name in all_names() {
             assert!(find(name).is_some(), "missing plugin for {name}");
@@ -247,6 +247,19 @@ mod tests {
         assert_eq!(
             find("kilo").unwrap().skill_file(cwd, shai_dir, skills_dir),
             PathBuf::from("/repo/AGENTS.md")
+        );
+        assert_eq!(
+            find("droid").unwrap().skill_file(cwd, shai_dir, skills_dir),
+            PathBuf::from("/repo/AGENTS.md")
+        );
+        assert_eq!(
+            find("crush").unwrap().skill_file(cwd, shai_dir, skills_dir),
+            PathBuf::from("/repo/CRUSH.md")
+        );
+        // cline: .clinerules doesn't exist as dir here → file path
+        assert_eq!(
+            find("cline").unwrap().skill_file(cwd, shai_dir, skills_dir),
+            PathBuf::from("/repo/.clinerules")
         );
         assert_eq!(
             find("generic")
@@ -343,6 +356,40 @@ mod tests {
         });
         assert_eq!(adapter.tool_name(&payload), Some("write_file".to_string()));
         assert_eq!(adapter.file_path("write_file", &payload), Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_droid_adapter_stream_json() {
+        let adapter = adapter_for("droid");
+
+        // Execute tool → extracts command
+        let exec_payload = json!({
+            "type": "tool_call",
+            "toolName": "Execute",
+            "parameters": { "command": "cargo test --quiet" }
+        });
+        assert_eq!(adapter.tool_name(&exec_payload), Some("Execute".to_string()));
+        assert_eq!(
+            adapter.command_text("Execute", &exec_payload),
+            Some("cargo test --quiet".to_string())
+        );
+        assert_eq!(adapter.file_path("Execute", &exec_payload), None);
+
+        // Write tool → extracts file path
+        let write_payload = json!({
+            "type": "tool_call",
+            "toolName": "Write",
+            "parameters": { "file_path": "src/lib.rs", "content": "..." }
+        });
+        assert_eq!(adapter.tool_name(&write_payload), Some("Write".to_string()));
+        assert_eq!(
+            adapter.file_path("Write", &write_payload),
+            Some("src/lib.rs".to_string())
+        );
+
+        // Non-tool-call JSON → returns None
+        let other = json!({ "type": "system", "model": "claude-4" });
+        assert_eq!(adapter.tool_name(&other), None);
     }
 
     #[test]

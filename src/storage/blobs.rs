@@ -17,6 +17,18 @@ impl Storage {
     }
 
     pub(super) fn load_event_bytes(&self, event_id: i64) -> Result<Vec<u8>, BlobLoadError> {
+        self.load_event_bytes_inner(event_id, 0)
+    }
+
+    fn load_event_bytes_inner(&self, event_id: i64, depth: u32) -> Result<Vec<u8>, BlobLoadError> {
+        const MAX_DELTA_DEPTH: u32 = 200;
+        if depth > MAX_DELTA_DEPTH {
+            return Err(BlobLoadError::DeltaCorrupted(format!(
+                "delta chain depth exceeded {} — possible cycle or corrupt data",
+                MAX_DELTA_DEPTH
+            )));
+        }
+
         let conn = self.conn();
         let (blob_hash, storage_kind, base_event_id): (String, String, Option<i64>) = conn
             .query_row(
@@ -41,7 +53,7 @@ impl Storage {
 
         let bytes = if storage_kind == "delta" {
             let base_id = base_event_id.ok_or(BlobLoadError::Missing)?;
-            let base = self.load_event_bytes(base_id)?;
+            let base = self.load_event_bytes_inner(base_id, depth + 1)?;
             apply_bytes_delta(&base, &payload)
                 .ok_or_else(|| BlobLoadError::DeltaCorrupted("failed to apply delta".to_string()))?
         } else {
@@ -53,16 +65,16 @@ impl Storage {
 
     pub fn gc(&self, days: u32, delete: bool, dry_run: bool) -> GcResult {
         let conn = self.conn();
-        let cutoff = format!("datetime('now', '-{} days')", days);
+        let cutoff_interval = format!("-{} days", days);
         let rows: Vec<(i64, String, String, Option<i64>, bool)> = conn
-            .prepare(&format!(
-                "SELECT id, blob_hash, storage_kind, base_event_id, timestamp < {} AS is_expired
+            .prepare(
+                "SELECT id, blob_hash, storage_kind, base_event_id,
+                        timestamp < datetime('now', ?1) AS is_expired
                  FROM timeline_events
                  WHERE event_kind='file_snapshot' AND blob_hash IS NOT NULL AND blob_hash != '[gc-deleted]'",
-                cutoff
-            ))
+            )
             .unwrap()
-            .query_map([], |row| {
+            .query_map([&cutoff_interval], |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,

@@ -20,7 +20,7 @@ mod tests {
         let tool_name = "Write";
         let query = "";
 
-        storage.record_change(session_key, llm, file_path, content, tool_name, query, None);
+        storage.record_change(session_key, llm, file_path, content, crate::storage::ChangeHints { tool_name, query_str: query, payload_json: None });
 
         let history = storage.get_history(10);
         assert_eq!(history.len(), 1);
@@ -43,9 +43,7 @@ mod tests {
             llm,
             "src/main.rs",
             b"fn main() {}",
-            "Write",
-            "",
-            None,
+            crate::storage::ChangeHints { tool_name: "Write", query_str: "", payload_json: None },
         );
 
         assert!(storage.session_missing_checkpoint(session_key, llm));
@@ -91,9 +89,7 @@ mod tests {
             "claude",
             "src/lib.rs",
             b"pub fn value() -> i32 { 1 }",
-            "Write",
-            "",
-            None,
+            crate::storage::ChangeHints { tool_name: "Write", query_str: "", payload_json: None },
         );
         let checkpoint_id = source_storage
             .record_checkpoint("roundtrip", "claude", "finished value")

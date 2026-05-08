@@ -25,9 +25,13 @@ pub(super) fn normalize_file_path(project_root: &std::path::Path, raw_file_path:
     } else {
         project_root.join(path)
     };
-    let mut normalized_path = absolute_path
-        .strip_prefix(project_root)
-        .unwrap_or(&absolute_path)
+    // Canonicalize to resolve symlinks so strip_prefix works correctly.
+    // Fall back to the unresolved path if the file doesn't exist yet.
+    let canonical_path = absolute_path.canonicalize().unwrap_or_else(|_| absolute_path.clone());
+    let canonical_root = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
+    let mut normalized_path = canonical_path
+        .strip_prefix(&canonical_root)
+        .unwrap_or(&canonical_path)
         .to_string_lossy()
         .to_string();
     if normalized_path.starts_with("./") {
@@ -36,8 +40,22 @@ pub(super) fn normalize_file_path(project_root: &std::path::Path, raw_file_path:
     normalized_path
 }
 
-pub(super) fn should_track(path: &str) -> bool {
-    !path.contains(".shai") && !path.contains(".git/") && !path.contains("node_modules/")
+pub(super) fn should_track(path: &str, gitignore: &ignore::gitignore::Gitignore) -> bool {
+    // Always exclude shai internals and git internals regardless of .gitignore
+    if path.contains(".shai") || path.contains("/.git/") || path.ends_with("/.git") {
+        return false;
+    }
+    // Honour .gitignore rules — covers build dirs, vendor, secrets, etc. for any project type
+    !gitignore
+        .matched_path_or_any_parents(std::path::Path::new(path), false)
+        .is_ignore()
+}
+
+pub(super) fn build_gitignore(project_root: &std::path::Path) -> ignore::gitignore::Gitignore {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(project_root);
+    builder.add(project_root.join(".gitignore"));
+    builder.add(project_root.join(".git").join("info").join("exclude"));
+    builder.build().unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
 }
 
 pub(super) fn apply_bytes_delta(_old: &[u8], delta: &[u8]) -> Option<Vec<u8>> {

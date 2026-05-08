@@ -20,7 +20,12 @@ impl Storage {
         .map_err(|err| err.to_string())?;
         let id = conn.last_insert_rowid();
         if let Some(branch) = branch {
-            self.add_memory_ref("branch", branch, "fact", id)?;
+            conn.execute(
+                "INSERT INTO memory_refs (project_id, ref_kind, ref_value, target_kind, target_id)
+                 VALUES (?1, 'branch', ?2, 'fact', ?3)",
+                params![project_id, branch, id],
+            )
+            .map_err(|err| err.to_string())?;
         }
         Ok(id)
     }
@@ -51,27 +56,14 @@ impl Storage {
         .map_err(|err| err.to_string())?;
         let id = conn.last_insert_rowid();
         if let Some(branch) = branch {
-            self.add_memory_ref("branch", branch, "decision", id)?;
+            conn.execute(
+                "INSERT INTO memory_refs (project_id, ref_kind, ref_value, target_kind, target_id)
+                 VALUES (?1, 'branch', ?2, 'decision', ?3)",
+                params![project_id, branch, id],
+            )
+            .map_err(|err| err.to_string())?;
         }
         Ok(id)
-    }
-
-    pub fn add_memory_ref(
-        &self,
-        ref_kind: &str,
-        ref_value: &str,
-        target_kind: &str,
-        target_id: i64,
-    ) -> Result<i64, String> {
-        let conn = self.conn();
-        let project_id = self.project_id();
-        conn.execute(
-            "INSERT INTO memory_refs (project_id, ref_kind, ref_value, target_kind, target_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![project_id, ref_kind, ref_value, target_kind, target_id],
-        )
-        .map_err(|err| err.to_string())?;
-        Ok(conn.last_insert_rowid())
     }
 
     pub fn verify_memory_fact(&self, id: i64) -> Result<MemoryVerifyOutcome, String> {
@@ -127,36 +119,42 @@ impl Storage {
         let project_id = self.project_id();
         let mut stmt = conn
             .prepare(
-                "SELECT id, project_id, fact_key, content, verified, source, created_at
-                 FROM memory_facts
-                 WHERE project_id=?1
-                 ORDER BY verified DESC, created_at DESC, id DESC
+                "SELECT f.id, f.project_id, f.fact_key, f.content, f.verified, f.source,
+                        f.created_at, GROUP_CONCAT(r.ref_value, ',') AS branch_refs
+                 FROM memory_facts f
+                 LEFT JOIN memory_refs r
+                   ON r.project_id = f.project_id
+                  AND r.target_kind = 'fact'
+                  AND r.target_id = f.id
+                  AND r.ref_kind = 'branch'
+                 WHERE f.project_id=?1
+                 GROUP BY f.id
+                 ORDER BY f.verified DESC, f.created_at DESC, f.id DESC
                  LIMIT ?2",
             )
             .unwrap();
         stmt.query_map(params![project_id, limit], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)? != 0,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-            ))
+            let branch_refs_raw: Option<String> = row.get(7)?;
+            Ok(MemoryFactRecord {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                fact_key: row.get(2)?,
+                content: row.get(3)?,
+                verified: row.get::<_, i64>(4)? != 0,
+                source: row.get(5)?,
+                created_at: row.get(6)?,
+                branch_refs: branch_refs_raw
+                    .map(|s| {
+                        s.split(',')
+                            .filter(|v| !v.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
         })
         .unwrap()
         .filter_map(Result::ok)
-        .map(|row| MemoryFactRecord {
-            id: row.0,
-            project_id: row.1,
-            fact_key: row.2,
-            content: row.3,
-            verified: row.4,
-            source: row.5,
-            created_at: row.6,
-            branch_refs: self.branch_refs_for("fact", row.0),
-        })
         .collect()
     }
 
@@ -165,38 +163,43 @@ impl Storage {
         let project_id = self.project_id();
         let mut stmt = conn
             .prepare(
-                "SELECT id, project_id, title, rationale, alternatives, status, verified, created_at
-                 FROM memory_decisions
-                 WHERE project_id=?1
-                 ORDER BY verified DESC, created_at DESC, id DESC
+                "SELECT d.id, d.project_id, d.title, d.rationale, d.alternatives, d.status,
+                        d.verified, d.created_at, GROUP_CONCAT(r.ref_value, ',') AS branch_refs
+                 FROM memory_decisions d
+                 LEFT JOIN memory_refs r
+                   ON r.project_id = d.project_id
+                  AND r.target_kind = 'decision'
+                  AND r.target_id = d.id
+                  AND r.ref_kind = 'branch'
+                 WHERE d.project_id=?1
+                 GROUP BY d.id
+                 ORDER BY d.verified DESC, d.created_at DESC, d.id DESC
                  LIMIT ?2",
             )
             .unwrap();
         stmt.query_map(params![project_id, limit], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, i64>(6)? != 0,
-                row.get::<_, String>(7)?,
-            ))
+            let branch_refs_raw: Option<String> = row.get(8)?;
+            Ok(MemoryDecisionRecord {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                title: row.get(2)?,
+                rationale: row.get(3)?,
+                alternatives: row.get(4)?,
+                status: row.get(5)?,
+                verified: row.get::<_, i64>(6)? != 0,
+                created_at: row.get(7)?,
+                branch_refs: branch_refs_raw
+                    .map(|s| {
+                        s.split(',')
+                            .filter(|v| !v.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
         })
         .unwrap()
         .filter_map(Result::ok)
-        .map(|row| MemoryDecisionRecord {
-            id: row.0,
-            project_id: row.1,
-            title: row.2,
-            rationale: row.3,
-            alternatives: row.4,
-            status: row.5,
-            verified: row.6,
-            created_at: row.7,
-            branch_refs: self.branch_refs_for("decision", row.0),
-        })
         .collect()
     }
 
@@ -291,22 +294,4 @@ impl Storage {
         out
     }
 
-    fn branch_refs_for(&self, target_kind: &str, target_id: i64) -> Vec<String> {
-        let conn = self.conn();
-        let project_id = self.project_id();
-        let mut stmt = conn
-            .prepare(
-                "SELECT ref_value
-                 FROM memory_refs
-                 WHERE project_id=?1 AND target_kind=?2 AND target_id=?3 AND ref_kind='branch'
-                 ORDER BY id ASC",
-            )
-            .unwrap();
-        stmt.query_map(params![project_id, target_kind, target_id], |row| {
-            row.get(0)
-        })
-        .unwrap()
-        .filter_map(Result::ok)
-        .collect()
-    }
 }

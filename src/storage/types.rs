@@ -15,29 +15,21 @@ pub struct Storage {
     pub shai_dir: PathBuf,
     pub(super) project_id_cache: std::sync::Mutex<Option<String>>,
     pub(super) content_store: super::content_store::RedbContentStore,
+    pub(super) gitignore_cache: std::sync::OnceLock<ignore::gitignore::Gitignore>,
 }
 
-pub enum StorageConn<'a> {
-    Owned(Connection),
-    _Phantom(std::marker::PhantomData<&'a ()>),
-}
+pub struct StorageConn(pub(super) Connection);
 
-impl<'a> std::ops::Deref for StorageConn<'a> {
+impl std::ops::Deref for StorageConn {
     type Target = Connection;
     fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Owned(conn) => conn,
-            _ => unreachable!(),
-        }
+        &self.0
     }
 }
 
-impl<'a> std::ops::DerefMut for StorageConn<'a> {
+impl std::ops::DerefMut for StorageConn {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Self::Owned(conn) => conn,
-            _ => unreachable!(),
-        }
+        &mut self.0
     }
 }
 
@@ -142,7 +134,7 @@ pub struct MemoryDecisionRecord {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "record_type", rename_all = "snake_case")]
 pub enum ExportRecord {
-    Event(ExportEventRecord),
+    Event(Box<ExportEventRecord>),
     MemoryFact(MemoryFactRecord),
     MemoryDecision(MemoryDecisionRecord),
 }

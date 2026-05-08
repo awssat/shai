@@ -53,9 +53,14 @@ pub(crate) fn cmd_history(limit: u32, file: Option<String>) {
         println!("No sessions recorded yet.");
         return;
     }
+
+    // Batch-fetch display events for all sessions in one query.
+    let session_ids: Vec<i64> = history.iter().map(|s| s.id).collect();
+    let mut events_by_session = db.get_display_events_batch(&session_ids);
+
     for s in &history {
         println!("[{}][{}] \"{}\"", s.started_at, s.llm, s.prompt);
-        for event in db.get_session_timeline(s.id) {
+        for event in events_by_session.remove(&s.id).unwrap_or_default() {
             match event.event_kind.as_str() {
                 "file_snapshot" => {
                     let Some(file_path) = event.file_path.as_deref() else {

@@ -1,4 +1,4 @@
-use super::{AgentPlugin, CmdSetup, HookAdapter, filter_flag, flag_value, strip_shai_block};
+use super::{AgentPlugin, CmdSetup, HookAdapter, filter_flag, flag_value};
 use super::generic::GenericAdapter;
 use std::path::Path;
 
@@ -13,20 +13,6 @@ impl AgentPlugin for OpenCodeAgent {
     /// OpenCode accepts `--system <text>` inline. Read it from args if present.
     fn existing_content(&self, args: &[String], _skill_file: &Path) -> Option<String> {
         flag_value(args, "--system").map(|s| s.to_string())
-    }
-
-    fn merge_content(&self, existing: Option<&str>, shai_content: &str) -> String {
-        match existing {
-            None => shai_content.to_string(),
-            Some(e) => {
-                let base = strip_shai_block(e);
-                if base.is_empty() {
-                    shai_content.to_string()
-                } else {
-                    format!("{}\n\n{}", base, shai_content)
-                }
-            }
-        }
     }
 
     fn cmd_setup(

@@ -256,14 +256,29 @@ fn parse_event_ok(line: &str) -> Option<(&str, i64)> {
     event_id.parse().ok().map(|id| (event_kind, id))
 }
 
-fn verify_event_with_retry(storage: &Storage, event_kind: &str, event_id: i64) -> bool {
-    for _ in 0..10 {
-        if storage.event_exists(event_id, event_kind) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
+fn verify_event_with_retry(
+    storage: Arc<Storage>,
+    event_kind: String,
+    event_id: i64,
+    warning_tx: std::sync::mpsc::Sender<String>,
+) {
+    // Fast path: most events are persisted by the time we see the SHAI_EVENT_OK line.
+    if storage.event_exists(event_id, &event_kind) {
+        return;
     }
-    false
+    // Slow path: retry in a background thread so the stdout render loop is never blocked.
+    std::thread::spawn(move || {
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(20));
+            if storage.event_exists(event_id, &event_kind) {
+                return;
+            }
+        }
+        let _ = warning_tx.send(format!(
+            "\n[SHAI] {} signal was printed but event {} was not persisted. Retry the command.\n",
+            event_kind, event_id
+        ));
+    });
 }
 
 fn looks_like_generic_tool_payload(payload: &Value) -> bool {
@@ -307,8 +322,10 @@ fn stabilize_and_record(
     let mut last_hash = None;
     let mut stable_content = Vec::new();
 
-    for _ in 0..10 {
-        std::thread::sleep(std::time::Duration::from_millis(40));
+    for i in 0..10 {
+        if i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
         if let Ok(content) = std::fs::read(&evt.file_path) {
             let current_hash = blake3::hash(&content);
             if let Some(prev) = last_hash {
@@ -331,9 +348,11 @@ fn stabilize_and_record(
         agent_cmd,
         &evt.file_path,
         &stable_content,
-        &evt.tool_name,
-        query_str,
-        None,
+        crate::storage::ChangeHints {
+            tool_name: &evt.tool_name,
+            query_str,
+            payload_json: None,
+        },
     );
 }
 
@@ -686,7 +705,9 @@ When a command is audited you will see `[SHAI] snapshotted and allowed: <cmd>`.\
     let stdout_handle = tokio::task::spawn_blocking(move || {
         let mut buffer = [0u8; 4096];
         let mut sniff_buffer: Vec<u8> = Vec::new();
+        let mut sniff_start: usize = 0;
         let mut line_buffer = String::new();
+        let mut line_start: usize = 0;
         let mut stdout = std::io::stdout();
         let mut warned_generic_miss = false;
 
@@ -700,21 +721,27 @@ When a command is audited you will see `[SHAI] snapshotted and allowed: <cmd>`.\
             sniff_buffer.extend_from_slice(bytes);
             line_buffer.push_str(&String::from_utf8_lossy(bytes));
 
-            while let Some(pos) = line_buffer.find('\n') {
-                let line = line_buffer[..pos].trim().to_string();
-                line_buffer.drain(..=pos);
+            while let Some(rel_pos) = line_buffer[line_start..].find('\n') {
+                let abs_pos = line_start + rel_pos;
+                let line = line_buffer[line_start..abs_pos].trim().to_string();
+                line_start = abs_pos + 1;
                 if let Some((event_kind, event_id)) = parse_event_ok(&line) {
-                    if !verify_event_with_retry(&storage_for_stdout, event_kind, event_id) {
-                        let _ = reminder_tx_for_stdout.send(format!(
-                            "\n[SHAI] {} signal was printed but event {} was not persisted. Retry the command.\n",
-                            event_kind, event_id
-                        ));
-                    }
+                    verify_event_with_retry(
+                        Arc::clone(&storage_for_stdout),
+                        event_kind.to_string(),
+                        event_id,
+                        reminder_tx_for_stdout.clone(),
+                    );
                 }
+            }
+            // Compact line_buffer: remove fully-consumed prefix when it is large enough
+            if line_start >= 64 * 1024 || line_buffer.len() > 128 * 1024 {
+                line_buffer.drain(..line_start);
+                line_start = 0;
             }
 
             let mut max_consumed = 0;
-            for (json_bytes, end_pos) in BalancedJsonIter::new(&sniff_buffer) {
+            for (json_bytes, end_pos) in BalancedJsonIter::new(&sniff_buffer[sniff_start..]) {
                 if let Ok(json) = serde_json::from_slice::<Value>(&json_bytes) {
                     let adapter = adapter_for(&agent_cmd_for_stdout);
                     let tool_name = adapter.tool_name(&json);
@@ -812,15 +839,25 @@ When a command is audited you will see `[SHAI] snapshotted and allowed: <cmd>`.\
                 }
                 max_consumed = max_consumed.max(end_pos);
             }
-            if max_consumed > 0 {
-                sniff_buffer.drain(..max_consumed);
-            }
-            if sniff_buffer.len() > 1024 * 1024 {
-                if let Some(last_start) = sniff_buffer.iter().rposition(|&b| b == b'{') {
-                    sniff_buffer.drain(..last_start);
-                } else {
+            sniff_start += max_consumed;
+            // Compact: remove consumed prefix when half the buffer is consumed or on overflow.
+            // This keeps drain() infrequent (amortized O(1)) instead of every iteration.
+            let unconsumed = sniff_buffer.len() - sniff_start;
+            if sniff_start >= 512 * 1024 || sniff_buffer.len() > 1024 * 1024 {
+                if unconsumed == 0 {
                     sniff_buffer.clear();
+                } else if sniff_buffer.len() > 1024 * 1024 {
+                    // On overflow find the last `{` in the unconsumed tail to avoid cutting mid-JSON
+                    let tail = &sniff_buffer[sniff_start..];
+                    if let Some(rel) = tail.iter().rposition(|&b| b == b'{') {
+                        sniff_buffer.drain(..sniff_start + rel);
+                    } else {
+                        sniff_buffer.clear();
+                    }
+                } else {
+                    sniff_buffer.drain(..sniff_start);
                 }
+                sniff_start = 0;
             }
         }
         drop(change_tx);

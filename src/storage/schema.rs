@@ -16,7 +16,9 @@ impl Storage {
         }
 
         if table_exists(&conn, "sessions") || table_exists(&conn, "changes") {
-            migrate_v10_to_v11(&conn);
+            if let Err(err) = migrate_v10_to_v11(&conn) {
+                panic!("shai: fatal schema migration failure: {}", err);
+            }
         } else {
             create_v11_schema(&conn);
             set_schema_version(&conn, SCHEMA_VERSION);
@@ -151,147 +153,57 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn migrate_v10_to_v11(conn: &Connection) {
-    let _ = conn.execute_batch("BEGIN IMMEDIATE");
+fn migrate_v10_to_v11(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // Run the entire migration inside a single IMMEDIATE transaction.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
 
-    if table_exists(conn, "timeline_events") {
-        let _ = conn.execute_batch("DROP TABLE timeline_events");
-    }
-    if table_exists(conn, "memory_facts") {
-        let _ = conn.execute_batch("DROP TABLE memory_facts");
-    }
-    if table_exists(conn, "memory_decisions") {
-        let _ = conn.execute_batch("DROP TABLE memory_decisions");
-    }
-    if table_exists(conn, "memory_refs") {
-        let _ = conn.execute_batch("DROP TABLE memory_refs");
-    }
-    if table_exists(conn, "sessions_v10") {
-        let _ = conn.execute_batch("DROP TABLE sessions_v10");
-    }
-    if table_exists(conn, "changes_v10") {
-        let _ = conn.execute_batch("DROP TABLE changes_v10");
-    }
-
-    if table_exists(conn, "sessions") {
-        let _ = conn.execute_batch("ALTER TABLE sessions RENAME TO sessions_v10");
-    }
-    if table_exists(conn, "changes") {
-        let _ = conn.execute_batch("ALTER TABLE changes RENAME TO changes_v10");
-    }
-
-    create_v11_schema(conn);
-
-    if table_exists(conn, "sessions_v10") {
-        let has_prompt = column_exists(conn, "sessions_v10", "prompt");
-        let has_agent_family = column_exists(conn, "sessions_v10", "agent_family");
-        let has_agent_name = column_exists(conn, "sessions_v10", "agent_name");
-
-        let prompt_col = if has_prompt { "prompt" } else { "'' AS prompt" };
-        let family_col = if has_agent_family { "agent_family" } else { "'' AS agent_family" };
-        let name_col = if has_agent_name { "agent_name" } else { "'' AS agent_name" };
-
-        let query = format!(
-            "SELECT id, session_key, project_id, llm, {family_col}, {name_col}, {prompt_col}, started_at, closed_at
-             FROM sessions_v10
-             ORDER BY id ASC"
-        );
-
-        let old_sessions = {
-            let mut stmt = conn.prepare(&query).unwrap();
-            stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                ))
-            })
-            .unwrap()
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>()
-        };
-
-        let mut seq_by_session: HashMap<i64, i64> = HashMap::new();
-        let mut closed_by_session: HashMap<i64, Option<String>> = HashMap::new();
-
-        for (
-            id,
-            session_key,
-            project_id,
-            llm,
-            agent_family,
-            agent_name,
-            prompt,
-            started_at,
-            closed_at,
-        ) in old_sessions
-        {
-            let _ = conn.execute(
-                "INSERT INTO sessions (id, session_key, project_id, llm, agent_family, agent_name, started_at, closed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    id,
-                    session_key,
-                    project_id,
-                    llm,
-                    agent_family,
-                    agent_name,
-                    started_at,
-                    closed_at
-                ],
-            );
-
-            let mut seq = 1i64;
-            let _ = conn.execute(
-                "INSERT INTO timeline_events (
-                    project_id, session_id, seq_in_session, event_kind, timestamp, actor_family, actor_name, summary
-                 ) VALUES (?1, ?2, ?3, 'session_started', ?4, ?5, ?6, '')",
-                params![project_id, id, seq, started_at, agent_family, agent_name],
-            );
-
-            if !prompt.trim().is_empty() && prompt != "(unrecorded prompt)" {
-                seq += 1;
-                let _ = conn.execute(
-                    "INSERT INTO timeline_events (
-                        project_id, session_id, seq_in_session, event_kind, timestamp, actor_family, actor_name, summary
-                     ) VALUES (?1, ?2, ?3, 'prompt_submitted', ?4, ?5, ?6, ?7)",
-                    params![project_id, id, seq, started_at, agent_family, agent_name, prompt],
-                );
-            }
-
-            seq_by_session.insert(id, seq);
-            closed_by_session.insert(id, closed_at);
+    let result = (|| -> Result<(), rusqlite::Error> {
+        if table_exists(conn, "timeline_events") {
+            conn.execute_batch("DROP TABLE timeline_events")?;
+        }
+        if table_exists(conn, "memory_facts") {
+            conn.execute_batch("DROP TABLE memory_facts")?;
+        }
+        if table_exists(conn, "memory_decisions") {
+            conn.execute_batch("DROP TABLE memory_decisions")?;
+        }
+        if table_exists(conn, "memory_refs") {
+            conn.execute_batch("DROP TABLE memory_refs")?;
+        }
+        if table_exists(conn, "sessions_v10") {
+            conn.execute_batch("DROP TABLE sessions_v10")?;
+        }
+        if table_exists(conn, "changes_v10") {
+            conn.execute_batch("DROP TABLE changes_v10")?;
         }
 
-        if table_exists(conn, "changes_v10") {
-            let ch_has_agent_family = column_exists(conn, "changes_v10", "agent_family");
-            let ch_has_agent_name = column_exists(conn, "changes_v10", "agent_name");
-            let ch_has_base = column_exists(conn, "changes_v10", "base_change_id");
-            let ch_has_raw = column_exists(conn, "changes_v10", "raw_bytes");
-            let ch_has_stored = column_exists(conn, "changes_v10", "stored_bytes");
+        if table_exists(conn, "sessions") {
+            conn.execute_batch("ALTER TABLE sessions RENAME TO sessions_v10")?;
+        }
+        if table_exists(conn, "changes") {
+            conn.execute_batch("ALTER TABLE changes RENAME TO changes_v10")?;
+        }
 
-            let family_col = if ch_has_agent_family { "agent_family" } else { "'' AS agent_family" };
-            let name_col = if ch_has_agent_name { "agent_name" } else { "'' AS agent_name" };
-            let base_col = if ch_has_base { "base_change_id" } else { "NULL AS base_change_id" };
-            let raw_col = if ch_has_raw { "raw_bytes" } else { "0 AS raw_bytes" };
-            let stored_col = if ch_has_stored { "stored_bytes" } else { "0 AS stored_bytes" };
+        create_v11_schema(conn);
 
-            let changes_query = format!(
-                "SELECT session_id, project_id, {family_col}, {name_col}, timestamp, file_path, blob_hash,
-                        ast_summary, tool_name_raw, payload_json, storage_kind, {base_col}, {raw_col}, {stored_col}
-                 FROM changes_v10
-                 ORDER BY session_id ASC, timestamp ASC, id ASC"
+        if table_exists(conn, "sessions_v10") {
+            let has_prompt = column_exists(conn, "sessions_v10", "prompt");
+            let has_agent_family = column_exists(conn, "sessions_v10", "agent_family");
+            let has_agent_name = column_exists(conn, "sessions_v10", "agent_name");
+
+            let prompt_col = if has_prompt { "prompt" } else { "'' AS prompt" };
+            let family_col = if has_agent_family { "agent_family" } else { "'' AS agent_family" };
+            let name_col = if has_agent_name { "agent_name" } else { "'' AS agent_name" };
+
+            let query = format!(
+                "SELECT id, session_key, project_id, llm, {family_col}, {name_col}, {prompt_col}, started_at, closed_at
+                 FROM sessions_v10
+                 ORDER BY id ASC"
             );
 
-            let old_changes = {
-                let mut stmt = conn.prepare(&changes_query).unwrap();
-                stmt.query_map([], |row| {
+            let old_sessions = {
+                let mut stmt = conn.prepare(&query)?;
+                let rows = stmt.query_map([], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
@@ -301,84 +213,186 @@ fn migrate_v10_to_v11(conn: &Connection) {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
-                        row.get::<_, String>(8)?,
-                        row.get::<_, Option<String>>(9)?,
-                        row.get::<_, String>(10)?,
-                        row.get::<_, Option<i64>>(11)?,
-                        row.get::<_, i64>(12)?,
-                        row.get::<_, i64>(13)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 })
                 .unwrap()
                 .filter_map(Result::ok)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+                rows
             };
 
-            for (
-                session_id,
-                project_id,
-                actor_family,
-                actor_name,
-                timestamp,
-                file_path,
-                blob_hash,
-                ast_summary,
-                tool_name,
-                payload_json,
-                storage_kind,
-                base_event_id,
-                raw_bytes,
-                stored_bytes,
-            ) in old_changes
-            {
-                let seq = seq_by_session.entry(session_id).or_insert(0);
-                *seq += 1;
-                let _ = conn.execute(
-                    "INSERT INTO timeline_events (
-                        project_id, session_id, seq_in_session, event_kind, timestamp, actor_family, actor_name,
-                        file_path, blob_hash, tool_name, summary, payload_json, storage_kind, base_event_id,
-                        raw_bytes, stored_bytes
-                     ) VALUES (?1, ?2, ?3, 'file_snapshot', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                    params![
-                        project_id,
-                        session_id,
-                        *seq,
-                        timestamp,
-                        actor_family,
-                        actor_name,
-                        file_path,
-                        blob_hash,
-                        tool_name,
-                        ast_summary,
-                        payload_json,
-                        storage_kind,
-                        base_event_id,
-                        raw_bytes,
-                        stored_bytes
-                    ],
-                );
-            }
-        }
+            let mut seq_by_session: HashMap<i64, i64> = HashMap::new();
+            let mut closed_by_session: HashMap<i64, Option<String>> = HashMap::new();
 
-        for (session_id, closed_at) in closed_by_session {
-            if let Some(closed_at) = closed_at {
-                let seq = seq_by_session.entry(session_id).or_insert(0);
-                *seq += 1;
-                let _ = conn.execute(
+            for (
+                id,
+                session_key,
+                project_id,
+                llm,
+                agent_family,
+                agent_name,
+                prompt,
+                started_at,
+                closed_at,
+            ) in old_sessions
+            {
+                conn.execute(
+                    "INSERT INTO sessions (id, session_key, project_id, llm, agent_family, agent_name, started_at, closed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        id,
+                        session_key,
+                        project_id,
+                        llm,
+                        agent_family,
+                        agent_name,
+                        started_at,
+                        closed_at
+                    ],
+                )?;
+
+                let mut seq = 1i64;
+                conn.execute(
                     "INSERT INTO timeline_events (
                         project_id, session_id, seq_in_session, event_kind, timestamp, actor_family, actor_name, summary
-                     )
-                     SELECT project_id, id, ?2, 'session_closed', ?3, agent_family, agent_name, ''
-                     FROM sessions
-                     WHERE id=?1",
-                    params![session_id, *seq, closed_at],
+                     ) VALUES (?1, ?2, ?3, 'session_started', ?4, ?5, ?6, '')",
+                    params![project_id, id, seq, started_at, agent_family, agent_name],
+                )?;
+
+                if !prompt.trim().is_empty() && prompt != "(unrecorded prompt)" {
+                    seq += 1;
+                    conn.execute(
+                        "INSERT INTO timeline_events (
+                            project_id, session_id, seq_in_session, event_kind, timestamp, actor_family, actor_name, summary
+                         ) VALUES (?1, ?2, ?3, 'prompt_submitted', ?4, ?5, ?6, ?7)",
+                        params![project_id, id, seq, started_at, agent_family, agent_name, prompt],
+                    )?;
+                }
+
+                seq_by_session.insert(id, seq);
+                closed_by_session.insert(id, closed_at);
+            }
+
+            if table_exists(conn, "changes_v10") {
+                let ch_has_agent_family = column_exists(conn, "changes_v10", "agent_family");
+                let ch_has_agent_name = column_exists(conn, "changes_v10", "agent_name");
+                let ch_has_base = column_exists(conn, "changes_v10", "base_change_id");
+                let ch_has_raw = column_exists(conn, "changes_v10", "raw_bytes");
+                let ch_has_stored = column_exists(conn, "changes_v10", "stored_bytes");
+
+                let family_col = if ch_has_agent_family { "agent_family" } else { "'' AS agent_family" };
+                let name_col = if ch_has_agent_name { "agent_name" } else { "'' AS agent_name" };
+                let base_col = if ch_has_base { "base_change_id" } else { "NULL AS base_change_id" };
+                let raw_col = if ch_has_raw { "raw_bytes" } else { "0 AS raw_bytes" };
+                let stored_col = if ch_has_stored { "stored_bytes" } else { "0 AS stored_bytes" };
+
+                let changes_query = format!(
+                    "SELECT session_id, project_id, {family_col}, {name_col}, timestamp, file_path, blob_hash,
+                            ast_summary, tool_name_raw, payload_json, storage_kind, {base_col}, {raw_col}, {stored_col}
+                     FROM changes_v10
+                     ORDER BY session_id ASC, timestamp ASC, id ASC"
                 );
+
+                let old_changes = {
+                    let mut stmt = conn.prepare(&changes_query)?;
+                    let rows = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, String>(7)?,
+                            row.get::<_, String>(8)?,
+                            row.get::<_, Option<String>>(9)?,
+                            row.get::<_, String>(10)?,
+                            row.get::<_, Option<i64>>(11)?,
+                            row.get::<_, i64>(12)?,
+                            row.get::<_, i64>(13)?,
+                        ))
+                    })
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .collect::<Vec<_>>();
+                    rows
+                };
+
+                for (
+                    session_id,
+                    project_id,
+                    actor_family,
+                    actor_name,
+                    timestamp,
+                    file_path,
+                    blob_hash,
+                    ast_summary,
+                    tool_name,
+                    payload_json,
+                    storage_kind,
+                    base_event_id,
+                    raw_bytes,
+                    stored_bytes,
+                ) in old_changes
+                {
+                    let seq = seq_by_session.entry(session_id).or_insert(0);
+                    *seq += 1;
+                    conn.execute(
+                        "INSERT INTO timeline_events (
+                            project_id, session_id, seq_in_session, event_kind, timestamp, actor_family, actor_name,
+                            file_path, blob_hash, tool_name, summary, payload_json, storage_kind, base_event_id,
+                            raw_bytes, stored_bytes
+                         ) VALUES (?1, ?2, ?3, 'file_snapshot', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                        params![
+                            project_id,
+                            session_id,
+                            *seq,
+                            timestamp,
+                            actor_family,
+                            actor_name,
+                            file_path,
+                            blob_hash,
+                            tool_name,
+                            ast_summary,
+                            payload_json,
+                            storage_kind,
+                            base_event_id,
+                            raw_bytes,
+                            stored_bytes
+                        ],
+                    )?;
+                }
+            }
+
+            for (session_id, closed_at) in closed_by_session {
+                if let Some(closed_at) = closed_at {
+                    let seq = seq_by_session.entry(session_id).or_insert(0);
+                    *seq += 1;
+                    conn.execute(
+                        "INSERT INTO timeline_events (
+                            project_id, session_id, seq_in_session, event_kind, timestamp, actor_family, actor_name, summary
+                         )
+                         SELECT project_id, id, ?2, 'session_closed', ?3, agent_family, agent_name, ''
+                         FROM sessions
+                         WHERE id=?1",
+                        params![session_id, *seq, closed_at],
+                    )?;
+                }
             }
         }
+
+        conn.execute_batch("DROP TABLE IF EXISTS changes_v10; DROP TABLE IF EXISTS sessions_v10;")?;
+        set_schema_version(conn, SCHEMA_VERSION);
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+        return result;
     }
 
-    let _ =
-        conn.execute_batch("DROP TABLE IF EXISTS changes_v10; DROP TABLE IF EXISTS sessions_v10;");
-    set_schema_version(conn, SCHEMA_VERSION);
-    let _ = conn.execute_batch("COMMIT");
+    conn.execute_batch("COMMIT")?;
+    Ok(())
 }

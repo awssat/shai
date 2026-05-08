@@ -75,14 +75,14 @@ impl Storage {
                 None
             };
 
-            let export_record = ExportRecord::Event(ExportEventRecord {
+            let export_record = ExportRecord::Event(Box::new(ExportEventRecord {
                 session_key,
                 llm,
                 started_at,
                 closed_at,
                 event,
                 blob_content_base64,
-            });
+            }));
             serde_json::to_writer(&mut writer, &export_record).map_err(|err| err.to_string())?;
             writer.write_all(b"\n").map_err(|err| err.to_string())?;
             events += 1;
@@ -106,13 +106,18 @@ impl Storage {
     }
 
     pub fn import_from<R: std::io::Read>(&self, reader: R) -> Result<ImportStats, String> {
-        let conn = self.conn();
+        let mut conn = self.conn();
         let target_project_id = self.project_id();
         let buf = std::io::BufReader::new(reader);
         let mut sessions_inserted = 0usize;
         let mut events_inserted = 0usize;
         let mut memory_records_inserted = 0usize;
 
+        // Collect all records first so we can wrap all DB writes in one transaction.
+        // Blobs are written to the content store before the transaction to keep SQLite
+        // and redb concerns separate; a partial blob write is harmless (the event row
+        // that references it is only committed once everything succeeds).
+        let mut records: Vec<ExportRecord> = Vec::new();
         for line in buf.lines() {
             let line = line.map_err(|err| err.to_string())?;
             if line.trim().is_empty() {
@@ -120,10 +125,37 @@ impl Storage {
             }
             let record: ExportRecord =
                 serde_json::from_str(&line).map_err(|err| err.to_string())?;
+            records.push(record);
+        }
 
+        // Write blobs to the content store outside the SQLite transaction.
+        for record in &records {
+            if let ExportRecord::Event(ev) = record {
+                if let (Some(hash), Some(raw_base64)) = (
+                    ev.event.blob_hash.as_deref(),
+                    ev.blob_content_base64.as_deref(),
+                ) {
+                    if hash != "[gc-deleted]" {
+                        let raw_bytes = base64::engine::general_purpose::STANDARD
+                            .decode(raw_base64)
+                            .map_err(|err| err.to_string())?;
+                        let compressed = zstd::encode_all(raw_bytes.as_slice(), 3)
+                            .map_err(|err| err.to_string())?;
+                        let _ = self.content_store().put(hash, &compressed);
+                    }
+                }
+            }
+        }
+
+        // Write all metadata in one atomic transaction.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|err| err.to_string())?;
+
+        for record in records {
             match record {
                 ExportRecord::Event(record) => {
-                    let session_inserted = conn
+                    let session_inserted = tx
                         .execute(
                             "INSERT OR IGNORE INTO sessions (
                     session_key, project_id, llm, agent_family, agent_name, started_at, closed_at
@@ -141,7 +173,7 @@ impl Storage {
                         .map_err(|err| err.to_string())?;
                     sessions_inserted += session_inserted;
 
-                    let session_id: i64 = conn
+                    let session_id: i64 = tx
                         .query_row(
                     "SELECT id FROM sessions WHERE session_key=?1 AND llm=?2 AND started_at=?3 LIMIT 1",
                             rusqlite::params![record.session_key, record.llm, record.started_at],
@@ -149,19 +181,7 @@ impl Storage {
                         )
                         .map_err(|err| err.to_string())?;
 
-                    if let (Some(hash), Some(raw_base64)) = (
-                        record.event.blob_hash.as_deref(),
-                        record.blob_content_base64.as_deref(),
-                    ) {
-                        let raw_bytes = base64::engine::general_purpose::STANDARD
-                            .decode(raw_base64)
-                            .map_err(|err| err.to_string())?;
-                        let compressed = zstd::encode_all(raw_bytes.as_slice(), 3)
-                            .map_err(|err| err.to_string())?;
-                        let _ = self.content_store().put(hash, &compressed);
-                    }
-
-                    let inserted = conn.execute(
+                    let inserted = tx.execute(
                 "INSERT OR IGNORE INTO timeline_events (
                     project_id, session_id, seq_in_session, event_kind, timestamp, actor_family, actor_name,
                     file_path, blob_hash, tool_name, summary, payload_json, raw_bytes, stored_bytes
@@ -188,14 +208,16 @@ impl Storage {
                     events_inserted += inserted;
                 }
                 ExportRecord::MemoryFact(fact) => {
-                    memory_records_inserted += import_memory_fact(&conn, &target_project_id, fact)?;
+                    memory_records_inserted += import_memory_fact(&tx, &target_project_id, fact)?;
                 }
                 ExportRecord::MemoryDecision(decision) => {
                     memory_records_inserted +=
-                        import_memory_decision(&conn, &target_project_id, decision)?;
+                        import_memory_decision(&tx, &target_project_id, decision)?;
                 }
             }
         }
+
+        tx.commit().map_err(|err| err.to_string())?;
 
         Ok(ImportStats {
             sessions_inserted,

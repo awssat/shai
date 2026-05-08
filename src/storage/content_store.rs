@@ -17,6 +17,7 @@ pub(super) struct RedbContentStore {
     primary_path: PathBuf,
     archive_path: PathBuf,
     primary_db: OnceLock<Option<Database>>,
+    archive_db: OnceLock<Option<Database>>,
 }
 
 impl RedbContentStore {
@@ -25,6 +26,7 @@ impl RedbContentStore {
             primary_path: shai_dir.join("blobs.redb"),
             archive_path: shai_dir.join("blobs_archive.redb"),
             primary_db: OnceLock::new(),
+            archive_db: OnceLock::new(),
         }
     }
 
@@ -44,12 +46,23 @@ impl RedbContentStore {
             .as_ref()
     }
 
-    fn open_db(path: &std::path::Path) -> Option<Database> {
-        Database::open(path).ok()
+    fn archive_db(&self) -> Option<&Database> {
+        self.archive_db
+            .get_or_init(|| match Database::create(&self.archive_path) {
+                Ok(db) => Some(db),
+                Err(err) => {
+                    tracing::error!(
+                        "shai: failed to open archive redb '{}': {}",
+                        self.archive_path.display(),
+                        err
+                    );
+                    None
+                }
+            })
+            .as_ref()
     }
 
-    fn load_from(path: &std::path::Path, hash: &str) -> Option<Vec<u8>> {
-        let db = Self::open_db(path)?;
+    fn read_from_db(db: &Database, hash: &str) -> Option<Vec<u8>> {
         let txn = db.begin_read().ok()?;
         let table = txn.open_table(BLOBS_TABLE).ok()?;
         let blob = table.get(hash).ok()??;
@@ -93,14 +106,12 @@ impl ContentStore for RedbContentStore {
 
     fn get(&self, hash: &str) -> Option<Vec<u8>> {
         let db = self.primary_db()?;
-        let txn = db.begin_read().ok()?;
-        let table = txn.open_table(BLOBS_TABLE).ok()?;
-        let blob = table.get(hash).ok()??;
-        zstd::decode_all(blob.value()).ok()
+        Self::read_from_db(db, hash)
     }
 
     fn get_archive(&self, hash: &str) -> Option<Vec<u8>> {
-        Self::load_from(&self.archive_path, hash)
+        let db = self.archive_db()?;
+        Self::read_from_db(db, hash)
     }
 
     fn remove(&self, hash: &str) {
@@ -139,7 +150,7 @@ impl ContentStore for RedbContentStore {
         let Some(primary) = self.primary_db() else {
             return false;
         };
-        let Some(archive) = Database::create(&self.archive_path).ok() else {
+        let Some(archive) = self.archive_db() else {
             return false;
         };
 

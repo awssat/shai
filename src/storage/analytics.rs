@@ -204,16 +204,20 @@ impl Storage {
                  JOIN sessions s ON s.id = e.session_id
                  WHERE e.project_id=?1 AND e.event_kind='file_snapshot'",
             );
+            let mut params: Vec<rusqlite::types::Value> =
+                vec![rusqlite::types::Value::Text(project_id.clone())];
             if let Some(filter) = file_filter {
-                sql.push_str(&format!(" AND e.file_path LIKE '%{}%'", filter));
+                sql.push_str(" AND e.file_path LIKE ?");
+                params.push(rusqlite::types::Value::Text(format!("%{}%", filter)));
             }
             sql.push_str(
                 " GROUP BY e.file_path, e.tool_name, s.llm
                   ORDER BY MAX(e.timestamp) DESC
-                  LIMIT ?2",
+                  LIMIT ?",
             );
+            params.push(rusqlite::types::Value::Integer(limit as i64));
             let mut stmt = conn.prepare(&sql).unwrap();
-            stmt.query_map(rusqlite::params![project_id, limit], |r| {
+            stmt.query_map(rusqlite::params_from_iter(params), |r| {
                 Ok(AnalyticsTouch {
                     file_path: r.get(0)?,
                     touch_count: r.get::<_, i64>(1)? as usize,
@@ -234,7 +238,7 @@ impl Storage {
                 .prepare(
                     "SELECT COALESCE(tool_name, 'Write'), COUNT(*)
                      FROM timeline_events
-                     WHERE project_id=?1 AND event_kind='tool_called'
+                     WHERE project_id=?1 AND event_kind='file_snapshot' AND tool_name IS NOT NULL
                      GROUP BY tool_name
                      ORDER BY COUNT(*) DESC
                      LIMIT ?2",

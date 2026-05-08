@@ -93,9 +93,7 @@ pub(crate) fn cmd_guard_exec(name: String, args: Vec<String>) -> ! {
             .filter(|p| p.is_dir())
             .or_else(|| find_shai_dir(&cwd.to_string_lossy()));
         shai_dir.map(|dir| {
-            let s = Storage::open(&dir);
-            s.init_schema();
-            s
+            Storage::open(&dir)
         })
     } else {
         None
@@ -283,14 +281,27 @@ fn spawn_and_capture(name: &str, args: &[String], guard_dir: &str) -> Result<Cap
     Ok(CaptureResult { exit_code, stdout, stderr })
 }
 
+/// Return a prefix of `s` that is at most `max` bytes and ends on a UTF-8
+/// character boundary, so slicing can never panic.
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut boundary = max;
+    while boundary > 0 && !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    &s[..boundary]
+}
+
 /// Serialise exit code + truncated output into a JSON string suitable for
 /// the `payload_json` column of `timeline_events`.
 fn build_exec_payload(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> String {
     const MAX: usize = 2048;
     let stdout_s = String::from_utf8_lossy(stdout);
     let stderr_s = String::from_utf8_lossy(stderr);
-    let stdout_val = if stdout.len() > MAX { &stdout_s[..MAX] } else { &stdout_s };
-    let stderr_val = if stderr.len() > MAX { &stderr_s[..MAX] } else { &stderr_s };
+    let stdout_val = truncate_utf8(&stdout_s, MAX);
+    let stderr_val = truncate_utf8(&stderr_s, MAX);
     serde_json::json!({
         "exit_code": exit_code,
         "stdout": stdout_val,

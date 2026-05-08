@@ -16,6 +16,7 @@ mod types;
 
 use self::content_store::RedbContentStore;
 use self::types::open_wal_connection;
+pub use self::sessions::ChangeHints;
 pub use self::types::*;
 
 impl Storage {
@@ -25,11 +26,17 @@ impl Storage {
             shai_dir: shai_dir.to_path_buf(),
             project_id_cache: std::sync::Mutex::new(None),
             content_store: RedbContentStore::new(shai_dir),
+            gitignore_cache: std::sync::OnceLock::new(),
         }
     }
 
-    fn conn(&self) -> StorageConn<'_> {
-        StorageConn::Owned(open_wal_connection(&self.shai_dir))
+    pub(super) fn gitignore(&self) -> &ignore::gitignore::Gitignore {
+        self.gitignore_cache
+            .get_or_init(|| self::helpers::build_gitignore(&self.project_root()))
+    }
+
+    fn conn(&self) -> StorageConn {
+        StorageConn(open_wal_connection(&self.shai_dir))
     }
 
     fn content_store(&self) -> &RedbContentStore {

@@ -2,7 +2,7 @@ use super::{
     ChangeRecord, FileChangeRecord, ProjectTimelineRecord, SessionRecord, Storage,
     TimelineEventRecord,
 };
-use rusqlite::{params, params_from_iter, types::Value, Connection};
+use rusqlite::{params, params_from_iter, types::Value};
 
 impl Storage {
     pub fn get_file_at_step(
@@ -69,20 +69,30 @@ impl Storage {
         since: Option<&str>,
     ) -> Vec<SessionRecord> {
         let conn = self.conn();
+
+        // --- Step 1: fetch sessions with prompt as a correlated subquery (no extra round-trips) ---
         let mut sql = String::from(
-            "SELECT id, session_key, llm, started_at
-             FROM sessions
-             WHERE project_id=?1",
+            "SELECT s.id, s.session_key, s.llm, s.started_at,
+                    (
+                        SELECT p.summary FROM timeline_events p
+                        WHERE p.session_id = s.id AND p.event_kind='prompt_submitted'
+                        ORDER BY p.seq_in_session ASC LIMIT 1
+                    ) AS prompt
+             FROM sessions s
+             WHERE s.project_id=?1",
         );
         let mut params = vec![Value::Text(self.project_id())];
 
         if let Some(since) = since {
-            sql.push_str(" AND started_at >= ?");
+            sql.push_str(" AND s.started_at >= ?");
             params.push(Value::Text(since.to_string()));
         }
 
         if !file_filter.is_empty() {
-            sql.push_str(" AND id IN (SELECT session_id FROM timeline_events WHERE event_kind='file_snapshot' AND (");
+            sql.push_str(
+                " AND s.id IN (SELECT session_id FROM timeline_events \
+                  WHERE event_kind='file_snapshot' AND (",
+            );
             for (index, filter) in file_filter.iter().enumerate() {
                 if index > 0 {
                     sql.push_str(" OR ");
@@ -93,95 +103,129 @@ impl Storage {
             sql.push_str("))");
         }
 
-        sql.push_str(" ORDER BY started_at DESC LIMIT ?");
+        sql.push_str(" ORDER BY s.started_at DESC LIMIT ?");
         params.push(Value::Integer(limit as i64));
 
         let mut stmt = conn.prepare(&sql).unwrap();
-        stmt.query_map(params_from_iter(params), |row| {
-            let id: i64 = row.get(0)?;
-            let prompt: Option<String> = conn
-                .query_row(
-                    "SELECT summary
-                     FROM timeline_events
-                     WHERE session_id=?1 AND event_kind='prompt_submitted'
-                     ORDER BY seq_in_session ASC
-                     LIMIT 1",
-                    [id],
-                    |prompt_row| prompt_row.get(0),
-                )
-                .ok();
-
-            Ok(SessionRecord {
-                id,
-                session_key: row.get(1)?,
-                llm: row.get(2)?,
-                prompt: prompt.unwrap_or_else(|| "(no prompt)".to_string()),
-                started_at: row.get(3)?,
-                changes: self.load_changes_for_session(&conn, id, file_filter),
+        // (session_id, session_key, llm, started_at, prompt)
+        type SessionRow = (i64, String, Option<String>, String, Option<String>);
+        let rows: Vec<SessionRow> = stmt
+            .query_map(params_from_iter(params), |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })
-        })
-        .unwrap()
-        .filter_map(Result::ok)
-        .collect()
-    }
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
 
-    pub fn load_changes_for_session(
-        &self,
-        conn: &Connection,
-        session_id: i64,
-        file_filter: &[String],
-    ) -> Vec<ChangeRecord> {
-        let mut sql = String::from(
-            "SELECT file_path, blob_hash, summary, COALESCE(tool_name, 'Write'), timestamp, actor_family, actor_name
-             FROM timeline_events
-             WHERE session_id=?1 AND event_kind='file_snapshot'",
-        );
-        let mut params = vec![Value::Integer(session_id)];
-
-        if !file_filter.is_empty() {
-            sql.push_str(" AND (");
-            for (index, filter) in file_filter.iter().enumerate() {
-                if index > 0 {
-                    sql.push_str(" OR ");
-                }
-                sql.push_str("file_path LIKE ?");
-                params.push(Value::Text(format!("%{}%", filter)));
-            }
-            sql.push(')');
+        if rows.is_empty() {
+            return Vec::new();
         }
 
-        sql.push_str(" ORDER BY timestamp ASC, id ASC");
+        // --- Step 2: load all changes for these sessions in one batch query ---
+        let session_ids: Vec<i64> = rows.iter().map(|(id, ..)| *id).collect();
+        let mut changes_by_session: std::collections::HashMap<i64, Vec<ChangeRecord>> =
+            session_ids.iter().map(|id| (*id, Vec::new())).collect();
 
-        let mut stmt = conn.prepare(&sql).unwrap();
-        stmt.query_map(params_from_iter(params), |row| {
-            Ok(ChangeRecord {
-                file_path: row.get(0)?,
-                blob_hash: row.get(1)?,
-                ast_summary: row.get(2)?,
-                tool_name: row.get(3)?,
-                timestamp: row.get(4)?,
-                agent_family: row.get(5)?,
-                agent_name: row.get(6)?,
+        let placeholder = session_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut changes_sql = format!(
+            "SELECT session_id, file_path, blob_hash, summary, COALESCE(tool_name, 'Write'), timestamp, actor_family, actor_name
+             FROM timeline_events
+             WHERE session_id IN ({}) AND event_kind='file_snapshot'",
+            placeholder
+        );
+        let mut changes_params: Vec<Value> = session_ids
+            .iter()
+            .map(|id| Value::Integer(*id))
+            .collect();
+
+        if !file_filter.is_empty() {
+            changes_sql.push_str(" AND (");
+            for (index, filter) in file_filter.iter().enumerate() {
+                if index > 0 {
+                    changes_sql.push_str(" OR ");
+                }
+                changes_sql.push_str("file_path LIKE ?");
+                changes_params.push(Value::Text(format!("%{}%", filter)));
+            }
+            changes_sql.push(')');
+        }
+        changes_sql.push_str(" ORDER BY timestamp ASC, id ASC");
+
+        let mut ch_stmt = conn.prepare(&changes_sql).unwrap();
+        ch_stmt
+            .query_map(params_from_iter(changes_params), |row| {
+                let sid: i64 = row.get(0)?;
+                Ok((
+                    sid,
+                    ChangeRecord {
+                        file_path: row.get(1)?,
+                        blob_hash: row.get(2)?,
+                        ast_summary: row.get(3)?,
+                        tool_name: row.get(4)?,
+                        timestamp: row.get(5)?,
+                        agent_family: row.get(6)?,
+                        agent_name: row.get(7)?,
+                    },
+                ))
             })
-        })
-        .unwrap()
-        .filter_map(Result::ok)
-        .collect()
+            .unwrap()
+            .filter_map(Result::ok)
+            .for_each(|(sid, rec)| {
+                changes_by_session.entry(sid).or_default().push(rec);
+            });
+
+        // --- Step 3: assemble results in original order ---
+        rows.into_iter()
+            .map(|(id, session_key, llm, started_at, prompt)| SessionRecord {
+                id,
+                session_key,
+                llm: llm.unwrap_or_default(),
+                prompt: prompt.unwrap_or_else(|| "(no prompt)".to_string()),
+                started_at,
+                changes: changes_by_session.remove(&id).unwrap_or_default(),
+            })
+            .collect()
     }
 
-    pub fn get_session_timeline(&self, session_id: i64) -> Vec<TimelineEventRecord> {
+    /// Batch-fetch display events (file_snapshot, checkpoint_created, guard_blocked,
+    /// guard_allowed) for multiple sessions in one query. Returns a map from session_id
+    /// to the ordered list of events, avoiding one query per session in `cmd_history`.
+    pub fn get_display_events_batch(
+        &self,
+        session_ids: &[i64],
+    ) -> std::collections::HashMap<i64, Vec<TimelineEventRecord>> {
+        if session_ids.is_empty() {
+            return std::collections::HashMap::new();
+        }
         let conn = self.conn();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, project_id, session_id, seq_in_session, event_kind, timestamp, actor_family,
-                        actor_name, file_path, blob_hash, tool_name, summary, payload_json, raw_bytes, stored_bytes
-                 FROM timeline_events
-                 WHERE session_id=?1
-                 ORDER BY seq_in_session ASC, id ASC",
-            )
-            .unwrap();
-
-        stmt.query_map([session_id], |row| {
+        let placeholder = session_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, project_id, session_id, seq_in_session, event_kind, timestamp,
+                    actor_family, actor_name, file_path, blob_hash, tool_name, summary,
+                    payload_json, raw_bytes, stored_bytes
+             FROM timeline_events
+             WHERE session_id IN ({placeholder})
+               AND event_kind IN ('file_snapshot', 'checkpoint_created', 'guard_blocked', 'guard_allowed')
+             ORDER BY session_id, seq_in_session ASC, id ASC"
+        );
+        let id_params: Vec<Value> = session_ids
+            .iter()
+            .map(|id| Value::Integer(*id))
+            .collect();
+        let mut by_session: std::collections::HashMap<i64, Vec<TimelineEventRecord>> =
+            session_ids.iter().map(|id| (*id, Vec::new())).collect();
+        let mut stmt = conn.prepare(&sql).unwrap();
+        stmt.query_map(params_from_iter(id_params), |row| {
             Ok(TimelineEventRecord {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
@@ -202,7 +246,10 @@ impl Storage {
         })
         .unwrap()
         .filter_map(Result::ok)
-        .collect()
+        .for_each(|ev| {
+            by_session.entry(ev.session_id).or_default().push(ev);
+        });
+        by_session
     }
 
     pub fn get_project_timeline(&self, limit: u32) -> Vec<ProjectTimelineRecord> {
