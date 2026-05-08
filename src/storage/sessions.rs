@@ -117,24 +117,6 @@ impl Storage {
             &project_id,
             &agent_family,
             &agent_name,
-            "tool_called",
-            None,
-            Some(&file_path),
-            None,
-            Some(&tool_name_norm),
-            &tool_name_norm,
-            payload_json,
-            0,
-            0,
-            "full",
-            None,
-        );
-
-        let _ = self.append_event(
-            session_id,
-            &project_id,
-            &agent_family,
-            &agent_name,
             "file_snapshot",
             None,
             Some(&file_path),
@@ -397,8 +379,13 @@ impl Storage {
         storage_kind: &str,
         base_event_id: Option<i64>,
     ) -> Result<i64, String> {
-        let conn = self.conn();
-        let seq = next_seq(&conn, session_id);
+        let mut conn = self.conn();
+        // BEGIN IMMEDIATE serializes concurrent writers so that `next_seq` and the
+        // INSERT are atomic — preventing duplicate seq_in_session values.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let seq = next_seq(&tx, session_id);
         let sql = if timestamp.is_some() {
             "INSERT INTO timeline_events (
                 project_id, session_id, seq_in_session, event_kind, timestamp, actor_family, actor_name,
@@ -414,7 +401,7 @@ impl Storage {
         };
 
         let result = if let Some(timestamp) = timestamp {
-            conn.execute(
+            tx.execute(
                 sql,
                 params![
                     project_id,
@@ -436,7 +423,7 @@ impl Storage {
                 ],
             )
         } else {
-            conn.execute(
+            tx.execute(
                 sql,
                 params![
                     project_id,
@@ -459,7 +446,9 @@ impl Storage {
         };
 
         result.map_err(|err| err.to_string())?;
-        Ok(conn.last_insert_rowid())
+        let row_id = tx.last_insert_rowid();
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(row_id)
     }
 }
 

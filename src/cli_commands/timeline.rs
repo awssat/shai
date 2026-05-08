@@ -160,7 +160,7 @@ pub(crate) fn cmd_diff(file: &str, steps: u32) {
     };
 
     let current_bytes = std::fs::read(&target_path).unwrap_or_default();
-    let diff = build_rollback_diff(file, &historical_bytes, &current_bytes, &time, &summary);
+    let diff = build_rollback_diff(file, &historical_bytes, &current_bytes, &time, &summary, steps);
     println!("{}", diff);
 }
 
@@ -221,21 +221,22 @@ pub fn build_rollback_diff(
     current_bytes: &[u8],
     timestamp: &str,
     summary: &str,
+    steps: u32,
 ) -> String {
     let historical_text = String::from_utf8_lossy(historical_bytes);
     let current_text = String::from_utf8_lossy(current_bytes);
 
     if historical_text == current_text {
         return format!(
-            "shai: '{}' already matches step 1 ({})\nNo changes to restore.",
-            file, summary
+            "shai: '{}' already matches step {} ({})\nNo changes to restore.",
+            file, steps, summary
         );
     }
 
     let diff = similar::TextDiff::from_lines(&current_text, &historical_text);
     let mut out = format!(
-        "shai: rollback preview for '{}'\nTarget: Step 1 (saved {})\nSummary: {}\n\n",
-        file, timestamp, summary
+        "shai: rollback preview for '{}'\nTarget: Step {} (saved {})\nSummary: {}\n\n",
+        file, steps, timestamp, summary
     );
 
     for change in diff.iter_all_changes() {
@@ -261,6 +262,7 @@ mod tests {
             b"fn main() {}\n",
             "2025-01-01 00:00:00",
             "no-op",
+            1,
         );
 
         assert!(diff.contains("already matches step 1"));

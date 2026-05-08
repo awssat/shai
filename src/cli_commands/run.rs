@@ -1,5 +1,5 @@
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -509,12 +509,20 @@ When a command is audited you will see `[SHAI] snapshotted and allowed: <cmd>`.\
         .spawn_command(cmd_builder)
         .map_err(|e| format!("failed to spawn agent '{}': {}", agent_cmd, e))?;
 
-    // Capture child PID for force-kill on repeated Ctrl+C
-    let child_pid: Option<u32> = child.process_id();
+    // Split off a killer handle before moving child into the wait task.
+    // Box<dyn ChildKiller + Send + Sync> can be sent across threads without
+    // storing a raw PID, removing the need for unsafe libc calls.
+    let mut child_killer = child.clone_killer();
     drop(pair.slave);
 
     let mut master_reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let master_writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+
+    // Share the master across the resize task and the force-kill path so we can
+    // query process_group_leader() at kill time (the current foreground pgrp,
+    // not just the original spawn PID).
+    let master_shared: Arc<Mutex<Box<dyn MasterPty + Send>>> =
+        Arc::new(Mutex::new(pair.master));
 
     // Wrap the writer in Arc<Mutex<>> so it can be shared between tasks
     let master_writer_shared = Arc::new(Mutex::new(master_writer));
@@ -525,6 +533,7 @@ When a command is audited you will see `[SHAI] snapshotted and allowed: <cmd>`.\
     let agent_cmd_for_stdin = agent_cmd.clone();
     let storage_for_stdin = storage_arc.clone();
     let master_writer_for_stdin = Arc::clone(&master_writer_shared);
+    let master_for_kill = Arc::clone(&master_shared);
 
     // For known agents, context is injected via proper channels (system prompt file, env var, CLI flag).
     // For unknown agents, the skill file is written to .shai/skills/shai-context.md — tell the
@@ -571,16 +580,29 @@ When a command is audited you will see `[SHAI] snapshotted and allowed: <cmd>`.\
                 drop(first);
 
                 if count >= 3 {
-                    // Force-kill: send SIGKILL to child and its process group
-                    if let Some(pid) = child_pid {
-                        eprintln!("\r\n[shai] Force-killing agent (PID {pid}) after 3× Ctrl+C");
-                        unsafe {
-                            libc::kill(pid as i32, libc::SIGKILL);
-                            // Also kill the process group in case the agent spawned children
-                            libc::kill(-(pid as i32), libc::SIGKILL);
+                    // Use process_group_leader() to target the *current* foreground
+                    // process group in the PTY — more accurate than the original
+                    // spawn PID when the agent has sub-processes in the foreground.
+                    #[cfg(unix)]
+                    {
+                        let pgrp = master_for_kill
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.process_group_leader());
+                        if let Some(pgrp) = pgrp {
+                            eprintln!("\r\n[shai] Force-killing process group {pgrp} after 3× Ctrl+C");
+                            unsafe {
+                                libc::kill(-(pgrp as libc::pid_t), libc::SIGKILL);
+                            }
+                        } else {
+                            eprintln!("\r\n[shai] Force-killing agent after 3× Ctrl+C");
+                            let _ = child_killer.kill();
                         }
-                    } else {
-                        eprintln!("\r\n[shai] Cannot force-kill: unknown PID. Use `kill <pid>` from another terminal.");
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        eprintln!("\r\n[shai] Force-killing agent after 3× Ctrl+C");
+                        let _ = child_killer.kill();
                     }
                     break;
                 }
@@ -804,19 +826,21 @@ When a command is audited you will see `[SHAI] snapshotted and allowed: <cmd>`.\
         drop(change_tx);
     });
 
-    let master = pair.master;
+    let master_for_resize = Arc::clone(&master_shared);
     #[cfg(unix)]
     let resize_handle = tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
         if let Ok(mut sigwinch) = signal(SignalKind::window_change()) {
             while sigwinch.recv().await.is_some() {
                 if let Ok((cols, rows)) = size() {
-                    let _ = master.resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    });
+                    if let Ok(m) = master_for_resize.lock() {
+                        let _ = m.resize(PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    }
                 }
             }
         }
@@ -826,12 +850,14 @@ When a command is audited you will see `[SHAI] snapshotted and allowed: <cmd>`.\
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if let Ok((cols, rows)) = size() {
-                let _ = master.resize(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                });
+                if let Ok(m) = master_for_resize.lock() {
+                    let _ = m.resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                }
             }
         }
     });

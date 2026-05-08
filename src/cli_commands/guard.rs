@@ -117,21 +117,38 @@ pub(crate) fn cmd_guard_exec(name: String, args: Vec<String>) -> ! {
             std::process::exit(1);
         }
         GuardDecision::Confirmable(reason) => {
-            if let Some(ref db) = storage {
-                let snapshotted =
-                    snapshot_guard_targets(db, &session_id, &agent, &command_text, None, &cwd);
-                let summary = format!(
-                    "allowed confirmable shell command: {} ({}, {} snapshot(s))",
-                    command_text, reason, snapshotted
-                );
-                let _ =
-                    db.record_guard_decision(&session_id, &agent, "guard_allowed", &summary, None);
-            }
+            let snapshotted = if let Some(ref db) = storage {
+                snapshot_guard_targets(db, &session_id, &agent, &command_text, None, &cwd)
+            } else {
+                0
+            };
             eprintln!(
                 "[SHAI] snapshotted and allowed: {} ({})",
                 command_text, reason
             );
-            exec_real(&name, &args, &guard_dir);
+            match spawn_and_capture(&name, &args, &guard_dir) {
+                Ok(result) => {
+                    if let Some(ref db) = storage {
+                        let payload = build_exec_payload(result.exit_code, &result.stdout, &result.stderr);
+                        let summary = format!(
+                            "allowed confirmable shell command: {} ({}, {} snapshot(s), exit={})",
+                            command_text, reason, snapshotted, result.exit_code
+                        );
+                        let _ = db.record_guard_decision(
+                            &session_id,
+                            &agent,
+                            "guard_allowed",
+                            &summary,
+                            Some(&payload),
+                        );
+                    }
+                    std::process::exit(result.exit_code);
+                }
+                Err(err) => {
+                    eprintln!("[SHAI] guard: spawn failed: {}", err);
+                    std::process::exit(1);
+                }
+            }
         }
         GuardDecision::Safe => {
             exec_real(&name, &args, &guard_dir);
@@ -197,4 +214,87 @@ fn exec_binary(bin: std::path::PathBuf, args: &[String]) -> ! {
         .map(|s| s.code().unwrap_or(0))
         .unwrap_or(1);
     std::process::exit(code);
+}
+
+struct CaptureResult {
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Spawn the real binary, tee its stdout/stderr to our own, wait for it, and
+/// return the exit code plus the captured output (for recording in the event
+/// payload). Unlike `exec_real`, this preserves the process boundary so we
+/// can observe what the command produced.
+fn spawn_and_capture(name: &str, args: &[String], guard_dir: &str) -> Result<CaptureResult, String> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    use std::thread;
+
+    let bin = find_real_binary(name, guard_dir)
+        .ok_or_else(|| format!("cannot find real '{}' binary in PATH", name))?;
+
+    let mut child = std::process::Command::new(&bin)
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn failed: {}", e))?;
+
+    let mut child_stdout = child.stdout.take().expect("piped stdout");
+    let mut child_stderr = child.stderr.take().expect("piped stderr");
+
+    let stdout_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            match child_stdout.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let _ = std::io::stdout().write_all(&tmp[..n]);
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+            }
+        }
+        buf
+    });
+
+    let stderr_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            match child_stderr.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let _ = std::io::stderr().write_all(&tmp[..n]);
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+            }
+        }
+        buf
+    });
+
+    let status = child.wait().map_err(|e| format!("wait failed: {}", e))?;
+    let exit_code = status.code().unwrap_or(-1);
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+
+    Ok(CaptureResult { exit_code, stdout, stderr })
+}
+
+/// Serialise exit code + truncated output into a JSON string suitable for
+/// the `payload_json` column of `timeline_events`.
+fn build_exec_payload(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> String {
+    const MAX: usize = 2048;
+    let stdout_s = String::from_utf8_lossy(stdout);
+    let stderr_s = String::from_utf8_lossy(stderr);
+    let stdout_val = if stdout.len() > MAX { &stdout_s[..MAX] } else { &stdout_s };
+    let stderr_val = if stderr.len() > MAX { &stderr_s[..MAX] } else { &stderr_s };
+    serde_json::json!({
+        "exit_code": exit_code,
+        "stdout": stdout_val,
+        "stderr": stderr_val,
+    })
+    .to_string()
 }
